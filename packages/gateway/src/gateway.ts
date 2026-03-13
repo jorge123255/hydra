@@ -1,96 +1,141 @@
-// The Hydra Gateway — the central orchestrator.
-// Wires the ChannelRegistry to OpenCode sessions.
-// This is where Kimaki's reliable OpenCode integration meets OpenClaw's multi-channel power.
+// The Hydra Gateway — central orchestrator.
+// Wires ChannelRegistry → SessionManager → OpenCode.
 
-import { ChannelRegistry, type InboundMessage, type ChannelEvent } from "@hydra/core";
-import { SessionManager } from "./session-manager.js";
-import { createLogger } from "./logger.js";
+import { ChannelRegistry, type InboundMessage, type ChannelEvent } from '@hydra/core'
+import { SessionManager } from './session-manager.js'
+import { runSession } from './opencode-session.js'
+import { stopServer } from './opencode-server.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('gateway')
 
 export type GatewayConfig = {
-  // Default working directory for coding sessions
-  workdir: string;
-  // How long (ms) before an idle session is swept (default: 30min)
-  sessionIdleMs?: number;
-};
+  workdir: string
+  sessionIdleMs?: number
+}
 
 export class Gateway {
-  private registry: ChannelRegistry;
-  private sessions: SessionManager;
-  private config: GatewayConfig;
-  private log = createLogger("gateway");
-  private sweepTimer?: NodeJS.Timeout;
+  private registry: ChannelRegistry
+  private sessions: SessionManager
+  private config: GatewayConfig
+  private sweepTimer?: NodeJS.Timeout
+  // Track in-flight abort controllers per session key
+  private activeRuns = new Map<string, AbortController>()
 
   constructor(registry: ChannelRegistry, config: GatewayConfig) {
-    this.registry = registry;
-    this.config = config;
-    this.sessions = new SessionManager({ defaultWorkdir: config.workdir });
+    this.registry = registry
+    this.config = config
+    this.sessions = new SessionManager({ defaultWorkdir: config.workdir })
   }
 
   async start(): Promise<void> {
-    this.log.info("Starting Hydra gateway...");
+    log.info('Starting Hydra gateway...')
+    this.registry.onMessage(this.handleMessage.bind(this))
+    this.registry.onEvent(this.handleEvent.bind(this))
+    await this.registry.startAll()
 
-    // Wire all channels to the message handler
-    this.registry.onMessage(this.handleMessage.bind(this));
-    this.registry.onEvent(this.handleEvent.bind(this));
+    const idleMs = this.config.sessionIdleMs ?? 30 * 60 * 1000
+    this.sweepTimer = setInterval(() => this.sessions.sweepIdle(idleMs), 5 * 60 * 1000)
 
-    // Start all registered channel adapters
-    await this.registry.startAll();
-
-    // Sweep idle sessions every 5 minutes
-    const idleMs = this.config.sessionIdleMs ?? 30 * 60 * 1000;
-    this.sweepTimer = setInterval(() => this.sessions.sweepIdle(idleMs), 5 * 60 * 1000);
-
-    this.log.info(`Gateway started with channels: ${this.registry.getAll().map((c) => c.id).join(", ")}`);
+    log.info(`Gateway running — channels: [${this.registry.getAll().map((c) => c.id).join(', ')}]`)
   }
 
   async stop(): Promise<void> {
-    this.log.info("Stopping Hydra gateway...");
-    if (this.sweepTimer) clearInterval(this.sweepTimer);
-    await this.registry.stopAll();
-    this.log.info("Gateway stopped.");
+    log.info('Stopping Hydra gateway...')
+    if (this.sweepTimer) clearInterval(this.sweepTimer)
+
+    // Abort all in-flight runs
+    for (const [key, ctrl] of this.activeRuns) {
+      log.debug(`Aborting run for session ${key}`)
+      ctrl.abort()
+    }
+
+    await this.registry.stopAll()
+    await stopServer()
+    log.info('Gateway stopped.')
   }
 
   private async handleMessage(message: InboundMessage): Promise<void> {
-    const session = this.sessions.getOrCreate(message);
-    const channel = this.registry.get(message.channelId);
-    if (!channel) return;
+    const session = this.sessions.getOrCreate(message)
+    const channel = this.registry.get(message.channelId)
+    if (!channel) return
 
-    this.log.debug(`[${message.channelId}] Message from ${message.senderName ?? message.senderId}: ${message.text.slice(0, 80)}`);
+    const { key } = session
+    log.info(`[${key}] "${message.text.slice(0, 100)}"`)
+
+    // Abort any existing run for this session (new message = interrupt)
+    const existing = this.activeRuns.get(key)
+    if (existing) {
+      log.debug(`[${key}] Aborting previous run`)
+      existing.abort()
+    }
+
+    const ctrl = new AbortController()
+    this.activeRuns.set(key, ctrl)
 
     try {
-      // Signal typing while the agent processes
-      await channel.sendTyping(message.threadId);
+      await channel.sendTyping(message.threadId)
 
-      // TODO: Route to OpenCode session using @opencode-ai/sdk
-      // Pattern from Kimaki's session-handler/thread-session-runtime.ts:
-      //   const client = getOpencodeClient(session.workdir)
-      //   const stream = client.session.run({ prompt: message.text, sessionId: session.key })
-      //   for await (const event of stream) { ... send partial replies ... }
-      //
-      // This is Phase 2 — for now log the session info
-      this.log.info(`[${session.key}] Received: "${message.text.slice(0, 120)}"`);
+      // Accumulate streamed chunks — send partial updates every ~500 chars
+      let pending = ''
+      let lastSentAt = Date.now()
+
+      const flushPending = async () => {
+        if (!pending) return
+        await channel.send({ threadId: message.threadId, text: pending })
+        pending = ''
+        lastSentAt = Date.now()
+      }
+
+      const result = await runSession({
+        sessionId: session.opencodeSessionId,
+        directory: session.workdir,
+        prompt: message.text,
+        signal: ctrl.signal,
+        onChunk: async (chunk) => {
+          pending += chunk
+          // Flush every ~400 chars or every 3s to keep the user updated
+          if (pending.length >= 400 || Date.now() - lastSentAt > 3000) {
+            await flushPending()
+          }
+        },
+      })
+
+      // Persist the OpenCode session ID for this thread
+      session.opencodeSessionId = result.sessionId
+
+      // Send any remaining text
+      const finalText = pending + (result.error ? `\n\n⚠️ ${result.error}` : '')
+      if (finalText.trim()) {
+        await channel.send({ threadId: message.threadId, text: finalText })
+      } else if (!result.text && !result.error) {
+        await channel.send({ threadId: message.threadId, text: '_(no response)_' })
+      }
 
     } catch (err) {
-      this.log.error(`[${session.key}] Error handling message:`, err);
+      if ((err as Error)?.name === 'AbortError') return
+      log.error(`[${key}] Unhandled error:`, err)
       await channel.send({
         threadId: message.threadId,
-        text: "An error occurred while processing your message. Please try again.",
+        text: '❌ Something went wrong. Please try again.',
         replyToId: message.id,
-      });
+      }).catch(() => {})
+    } finally {
+      this.activeRuns.delete(key)
     }
   }
 
   private handleEvent(event: ChannelEvent): void {
     switch (event.type) {
-      case "connected":
-        this.log.info(`Channel connected: ${event.channelId}`);
-        break;
-      case "disconnected":
-        this.log.info(`Channel disconnected: ${event.channelId} — ${event.reason ?? "no reason"}`);
-        break;
-      case "error":
-        this.log.error(`Channel error [${event.channelId}]:`, event.error);
-        break;
+      case 'connected':
+        log.info(`✓ ${event.channelId} connected`)
+        break
+      case 'disconnected':
+        log.warn(`✗ ${event.channelId} disconnected${event.reason ? ` — ${event.reason}` : ''}`)
+        break
+      case 'error':
+        log.error(`[${event.channelId}] error:`, event.error.message)
+        break
     }
   }
 }
