@@ -1,0 +1,16 @@
+{
+  "name": "hydra",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter gateway dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
