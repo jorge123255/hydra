@@ -1,5 +1,5 @@
 // The Hydra Gateway — central orchestrator.
-// Wires ChannelRegistry → SessionManager → OpenCode.
+// Wires ChannelRegistry → SessionManager (with worktrees) → OpenCode.
 
 import { ChannelRegistry, type InboundMessage, type ChannelEvent } from '@hydra/core'
 import { SessionManager } from './session-manager.js'
@@ -12,6 +12,8 @@ const log = createLogger('gateway')
 export type GatewayConfig = {
   workdir: string
   sessionIdleMs?: number
+  // Enable per-thread git worktrees (requires workdir to be a git repo)
+  worktrees?: boolean
 }
 
 export class Gateway {
@@ -19,13 +21,15 @@ export class Gateway {
   private sessions: SessionManager
   private config: GatewayConfig
   private sweepTimer?: NodeJS.Timeout
-  // Track in-flight abort controllers per session key
   private activeRuns = new Map<string, AbortController>()
 
   constructor(registry: ChannelRegistry, config: GatewayConfig) {
     this.registry = registry
     this.config = config
-    this.sessions = new SessionManager({ defaultWorkdir: config.workdir })
+    this.sessions = new SessionManager({
+      defaultWorkdir: config.workdir,
+      worktreesEnabled: config.worktrees ?? false,
+    })
   }
 
   async start(): Promise<void> {
@@ -44,7 +48,6 @@ export class Gateway {
     log.info('Stopping Hydra gateway...')
     if (this.sweepTimer) clearInterval(this.sweepTimer)
 
-    // Abort all in-flight runs
     for (const [key, ctrl] of this.activeRuns) {
       log.debug(`Aborting run for session ${key}`)
       ctrl.abort()
@@ -63,7 +66,10 @@ export class Gateway {
     const { key } = session
     log.info(`[${key}] "${message.text.slice(0, 100)}"`)
 
-    // Abort any existing run for this session (new message = interrupt)
+    // Provision worktree on first message if enabled
+    await this.sessions.ensureWorktree(session)
+
+    // Abort any existing run (new message = interrupt)
     const existing = this.activeRuns.get(key)
     if (existing) {
       log.debug(`[${key}] Aborting previous run`)
@@ -76,7 +82,6 @@ export class Gateway {
     try {
       await channel.sendTyping(message.threadId)
 
-      // Accumulate streamed chunks — send partial updates every ~500 chars
       let pending = ''
       let lastSentAt = Date.now()
 
@@ -94,17 +99,14 @@ export class Gateway {
         signal: ctrl.signal,
         onChunk: async (chunk) => {
           pending += chunk
-          // Flush every ~400 chars or every 3s to keep the user updated
           if (pending.length >= 400 || Date.now() - lastSentAt > 3000) {
             await flushPending()
           }
         },
       })
 
-      // Persist the OpenCode session ID for this thread
       session.opencodeSessionId = result.sessionId
 
-      // Send any remaining text
       const finalText = pending + (result.error ? `\n\n⚠️ ${result.error}` : '')
       if (finalText.trim()) {
         await channel.send({ threadId: message.threadId, text: finalText })

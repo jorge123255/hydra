@@ -11,6 +11,7 @@
     "@hydra/core": "workspace:^",
     "@hydra/discord": "workspace:^",
     "@hydra/telegram": "workspace:^",
+    "@hydra/slack": "workspace:^",
     "@opencode-ai/sdk": "^1.2.15",
     "zod": "^4.3.6"
   },

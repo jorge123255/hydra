@@ -1,20 +1,24 @@
 // OpenCode session runner — creates sessions and streams responses back.
 // Ported from Kimaki's thread-session-runtime.ts, generalized for any channel.
 
-import type { OpencodeClient } from '@opencode-ai/sdk/v2'
+import type { PermissionRuleset } from '@opencode-ai/sdk/v2'
 import { getClient } from './opencode-server.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('opencode-session')
 
+const DEFAULT_PERMISSIONS: PermissionRuleset = [
+  { permission: 'edit', pattern: '**', action: 'allow' },
+  { permission: 'bash', pattern: '**', action: 'allow' },
+  { permission: 'webfetch', pattern: '**', action: 'allow' },
+  { permission: 'external_directory', pattern: '**', action: 'ask' },
+]
+
 export type RunOptions = {
-  // Persistent session ID (reuse across messages in same thread)
   sessionId?: string
   directory: string
   prompt: string
-  // Called with streamed text chunks as they arrive
-  onChunk?: (text: string) => void
-  // Abort signal
+  onChunk?: (text: string) => Promise<void>
   signal?: AbortSignal
 }
 
@@ -28,69 +32,57 @@ export async function runSession(opts: RunOptions): Promise<RunResult> {
   const { directory, prompt, onChunk, signal } = opts
   const client = await getClient(directory)
 
-  // Create or reuse session
+  // Create or reuse session — flat params per Kimaki's session.create pattern
   let sessionId = opts.sessionId
   if (!sessionId) {
-    const sessionResp = await client.session.create({
+    const resp = await client.session.create({
       title: prompt.slice(0, 80),
       directory,
-      permission: {
-        edit: 'allow',
-        bash: 'allow',
-        external_directory: 'ask',
-        webfetch: 'allow',
-      },
+      permission: DEFAULT_PERMISSIONS,
     })
-    sessionId = sessionResp.data.id
-    log.debug(`Created session ${sessionId} for dir: ${directory}`)
+    sessionId = resp.data?.id
+    if (!sessionId) throw new Error('Failed to create OpenCode session')
+    log.debug(`Created session ${sessionId}`)
   }
 
-  // Send the message
-  await client.message.create({
+  // Send prompt async — fire and forget, events carry the response
+  await client.session.promptAsync({
     sessionID: sessionId,
     directory,
     parts: [{ type: 'text', text: prompt }],
   })
 
-  // Subscribe to event stream and collect response
+  // Subscribe to event stream
   const subscribeResp = await client.event.subscribe(
     { directory },
-    { signal },
+    { signal } as any,
   )
 
   const outputParts: string[] = []
   let error: string | undefined
 
   try {
-    for await (const event of subscribeResp.stream) {
+    for await (const event of (subscribeResp as any).stream ?? []) {
       if (signal?.aborted) break
 
-      // Collect text parts from assistant messages
-      if (
-        event.type === 'message.part.updated' &&
-        event.properties.part.type === 'text'
-      ) {
-        const part = event.properties.part as { type: 'text'; text: string }
-        if (part.text) {
+      if (event.type === 'message.part.updated') {
+        const part = event.properties?.part
+        if (part?.type === 'text' && typeof part.text === 'string' && part.text) {
           outputParts.push(part.text)
-          onChunk?.(part.text)
+          await onChunk?.(part.text)
         }
       }
 
-      // Session idle = agent finished
-      if (
-        event.type === 'session.status' &&
-        event.properties.status === 'idle' &&
-        // @ts-ignore - sessionID may be on properties
-        (event.properties.sessionID === sessionId || !event.properties.sessionID)
-      ) {
-        break
+      // session.idle = agent finished for this session
+      if (event.type === 'session.idle') {
+        const idleId = event.properties?.sessionID
+        if (!idleId || idleId === sessionId) break
       }
 
-      // Session error
       if (event.type === 'session.error') {
-        error = event.properties.error?.message ?? 'Unknown session error'
-        log.error(`Session ${sessionId} error:`, error)
+        const err = event.properties?.error as any
+        error = err?.message ?? err?.detail ?? 'Unknown session error'
+        log.error(`Session ${sessionId} error: ${error}`)
         break
       }
     }
@@ -101,9 +93,5 @@ export async function runSession(opts: RunOptions): Promise<RunResult> {
     }
   }
 
-  return {
-    sessionId,
-    text: outputParts.join(''),
-    error,
-  }
+  return { sessionId, text: outputParts.join(''), error }
 }
