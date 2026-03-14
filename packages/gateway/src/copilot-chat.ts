@@ -35,7 +35,7 @@ export async function callClaudeDirect(prompt: string, images?: string[]): Promi
     throw new Error('No Claude credentials — set ANTHROPIC_API_KEY or ensure Claude Code is logged in')
   }
 
-  const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-5'
+  const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'
 
   // Build content array — images first, then text
   type ImageBlock = { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }

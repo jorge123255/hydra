@@ -257,7 +257,7 @@ export class Gateway {
     if (modelMatch) {
       // Anthropic API models (used when ANTHROPIC_API_KEY or Claude Code OAuth)
       const CLAUDE_MODELS = [
-        'claude-opus-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5',
+        'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5-20251001',
       ]
       // GitHub Copilot models (used when /copilot-login configured)
       const COPILOT_MODELS = ['claude-sonnet-4.6', 'gpt-4o', 'gpt-4.1', 'gpt-4.1-mini', 'o3-mini']
@@ -266,7 +266,7 @@ export class Gateway {
 
       if (!modelMatch[1]) {
         // Show current + available
-        const current = process.env.HYDRA_CLAUDE_MODEL ?? (usingCopilot ? 'claude-sonnet-4.6' : 'claude-sonnet-4-5')
+        const current = process.env.HYDRA_CLAUDE_MODEL ?? (usingCopilot ? 'claude-sonnet-4.6' : 'claude-sonnet-4-6')
         const anthropicList = CLAUDE_MODELS.map((m) => (m === current ? `• \`${m}\` ← current` : `• \`${m}\``)).join('\n')
         const copilotList = COPILOT_MODELS.map((m) => (m === current ? `• \`${m}\` ← current` : `• \`${m}\``)).join('\n')
         const text = [
