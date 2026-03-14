@@ -17,7 +17,7 @@ import { buildMemoryPrompt, appendMemory, writeMemory } from './memory.js'
 import { createLogger } from './logger.js'
 import { isAllowed, upsertPairingRequest, approvePairing, revokePairing, listPendingRequests } from './pairing.js'
 import { classifyIntent, stripIntentPrefix } from './router.js'
-import { isCopilotConfigured, githubCopilotLogin, resolveCopilotCredentials, getVisionUsageStatus } from './copilot-chat.js'
+import { isCopilotConfigured, isClaudeConfigured, githubCopilotLogin, resolveCopilotCredentials, getVisionUsageStatus, callDirect } from './copilot-chat.js'
 import { createFromPR, getWorktreeDiff, rollbackWorktree } from './worktree-manager.js'
 
 const log = createLogger('gateway')
@@ -39,6 +39,8 @@ const CMD_REVOKE     = /^\/revoke\s+(\S+)\s+(\S+)/i   // /revoke {channelId} {se
 const CMD_PENDING    = /^\/pending(?:\s+(\S+))?$/i     // /pending [channelId]
 const CMD_COPILOT    = /^\/copilot-login$/i
 const CMD_COPILOT_STATUS = /^\/copilot-status$/i
+const CMD_CLAUDE_STATUS  = /^\/claude-status$/i
+const CMD_CLAUDE_KEY     = /^\/claude-key\s+(\S+)/i   // /claude-key sk-ant-...
 const CMD_VISION_USAGE = /^\/vision-usage$/i
 const CMD_LINK       = /^\/link(?:\s+(\S+))?$/i          // /link [accountId]
 const CMD_HANDOFF    = /^\/handoff\s+(\S+)/i              // /handoff {channelId}
@@ -126,6 +128,8 @@ export class Gateway {
           '`/pending [channelId]` — list pending pairing requests',
           '`/copilot-login` — connect GitHub Copilot (free claude-sonnet-4.6)',
           '`/copilot-status` — check Copilot auth status',
+          '`/claude-key <sk-ant-...>` — set Anthropic API key (owner only, DM only)',
+          '`/claude-status` — check Anthropic API key status',
           '`/vision-usage` — check vision budget usage',
           '`/link [accountId]` — link your identity for cross-channel sessions',
           '`/handoff <channelId>` — send session summary to another channel',
@@ -247,6 +251,39 @@ export class Gateway {
       return
     }
 
+    const claudeKeyMatch = CMD_CLAUDE_KEY.exec(text)
+    if (claudeKeyMatch) {
+      if (!this.isOwner(message.channelId, message.senderId)) {
+        await channel.send({ threadId: message.threadId, text: '❌ Only the bot owner can set the API key.' })
+        return
+      }
+      const key = claudeKeyMatch[1].trim()
+      if (!key.startsWith('sk-ant-')) {
+        await channel.send({ threadId: message.threadId, text: '❌ Invalid key format — should start with `sk-ant-`' })
+        return
+      }
+      // Save to credentials file and update process.env for this run
+      const fs = await import('node:fs')
+      const path = await import('node:path')
+      const os = await import('node:os')
+      const credDir = path.join(os.homedir(), '.hydra', 'credentials')
+      fs.mkdirSync(credDir, { recursive: true })
+      fs.writeFileSync(path.join(credDir, 'anthropic.json'), JSON.stringify({ key, savedAt: new Date().toISOString() }, null, 2))
+      process.env.ANTHROPIC_API_KEY = key
+      await channel.send({ threadId: message.threadId, text: `✅ Claude API key saved!\nModel: \`${process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-5'}\`\nKey ends in: \`...${key.slice(-6)}\`\n\n_Delete this message for security._` })
+      return
+    }
+
+    if (CMD_CLAUDE_STATUS.test(text)) {
+      if (isClaudeConfigured()) {
+        const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-5'
+        await channel.send({ threadId: message.threadId, text: `✅ Claude API active\nModel: \`${model}\`\nKey: \`...${(process.env.ANTHROPIC_API_KEY ?? '').slice(-6)}\`` })
+      } else {
+        await channel.send({ threadId: message.threadId, text: '❌ ANTHROPIC_API_KEY not set in .env' })
+      }
+      return
+    }
+
     if (CMD_VISION_USAGE.test(text)) {
       const { count, budget, remaining } = getVisionUsageStatus()
       await channel.send({ threadId: message.threadId, text: `👁️ Vision usage today: ${count}/${budget} calls used, ${remaining} remaining.` })
@@ -336,7 +373,7 @@ export class Gateway {
       }
 
       // ── Fast chat via Copilot (Phase 6B) ─────────────────────────────────
-      if (intent === 'fast' || (intent === 'chat' && isCopilotConfigured())) {
+      if (intent === 'fast' || (intent === 'chat' && (isClaudeConfigured() || isCopilotConfigured()))) {
         await this.runCopilotChat(message, fullPrompt, message.images, channel)
         return
       }
@@ -403,9 +440,9 @@ export class Gateway {
   ): Promise<void> {
     const placeholderId = await channel.sendAndGetId({ threadId: message.threadId, text: '⏳ _thinking..._' })
     try {
-      const { callCopilotDirect } = await import('./copilot-chat.js')
+      const { callDirect } = await import('./copilot-chat.js')
       const memoryPrefix = buildMemoryPrompt(message.channelId, message.threadId)
-      const text = await callCopilotDirect(memoryPrefix ? `${memoryPrefix}${prompt}` : prompt, images)
+      const text = await callDirect(memoryPrefix ? `${memoryPrefix}${prompt}` : prompt, images)
       await channel.editMessage(message.threadId, placeholderId, text).catch(() => {
         channel.send({ threadId: message.threadId, text })
       })

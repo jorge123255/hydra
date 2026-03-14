@@ -1,6 +1,9 @@
 // Hydra Gateway entry point.
 // Configure channels via environment variables and start.
 
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
 import { ChannelRegistry } from '@hydra/core'
 import { DiscordChannel } from '@hydra/discord'
 import { TelegramChannel } from '@hydra/telegram'
@@ -10,7 +13,24 @@ import { createLogger } from './logger.js'
 
 const log = createLogger('main')
 
+// Load saved credentials that aren't in .env
+function loadSavedCredentials() {
+  const credDir = path.join(os.homedir(), '.hydra', 'credentials')
+  // Anthropic API key saved via /claude-key command
+  if (!process.env.ANTHROPIC_API_KEY) {
+    try {
+      const saved = JSON.parse(fs.readFileSync(path.join(credDir, 'anthropic.json'), 'utf8'))
+      if (saved?.key) {
+        process.env.ANTHROPIC_API_KEY = saved.key
+        log.info('Loaded Anthropic API key from credentials file')
+      }
+    } catch {}
+  }
+}
+
 async function main() {
+  loadSavedCredentials()
+
   const registry = new ChannelRegistry()
 
   // Discord
