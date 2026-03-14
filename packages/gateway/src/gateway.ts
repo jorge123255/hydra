@@ -1,9 +1,4 @@
 // The Hydra Gateway — central orchestrator.
-// Features: vision, streaming, pairing, OAuth, Copilot, model routing,
-//           computer-use, cross-channel sessions, PR worktrees,
-//           structured system prompt, bootstrap workspace files, message envelope,
-//           NO_REPLY/HEARTBEAT_OK protocol, emoji reactions, heartbeat proactive loop,
-//           inbound debounce, better streaming, memory search, owner ID hashing.
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -23,10 +18,10 @@ import { createFromPR, getWorktreeDiff, rollbackWorktree } from './worktree-mana
 import { buildSystemPrompt, NO_REPLY, HEARTBEAT_OK } from './system-prompt.js'
 import { ensureWorkspaceFiles, readWorkspaceFiles } from './workspace.js'
 import { HeartbeatManager, HEARTBEAT_PROMPT } from './heartbeat.js'
+import { parseSaveTags, applySaveTag, detectAutoUpdates } from './self-update.js'
 
 const log = createLogger('gateway')
 
-/** True if opencode auth.json has any anthropic credentials */
 function hasOpencodeAuth(): boolean {
   try {
     const data = JSON.parse(fs.readFileSync(
@@ -36,7 +31,6 @@ function hasOpencodeAuth(): boolean {
   } catch { return false }
 }
 
-/** True if any AI credentials are available */
 function hasAnyCredentials(): boolean {
   return isClaudeConfigured() || isCopilotConfigured() || hasOpencodeAuth()
 }
@@ -88,10 +82,8 @@ export class Gateway {
   private scheduler: Scheduler
   private pendingOAuth = new Map<string, PendingOAuth>()
   private heartbeat: HeartbeatManager
-  // Feature 7: inbound debounce — batch rapid messages from same sender
   private debounceMap = new Map<string, { timer: ReturnType<typeof setTimeout>; messages: InboundMessage[] }>()
   private readonly DEBOUNCE_MS = 600
-  // Feature 3: track last message time per thread for envelope elapsed time
   private lastMessageAt = new Map<string, Date>()
 
   constructor(registry: ChannelRegistry, config: GatewayConfig) {
@@ -135,21 +127,28 @@ export class Gateway {
 
   private getOwnerIds(): string[] {
     return (process.env.HYDRA_OWNER_IDS ?? '').split(',')
-      .map((s) => {
-        const parts = s.trim().split(':')
-        return parts[parts.length - 1]
-      })
+      .map((s) => { const parts = s.trim().split(':'); return parts[parts.length - 1] })
       .filter(Boolean)
   }
 
-  // ── Feature 7: Inbound debounce ──────────────────────────────────────────────
+  /** Strip [SAVE: key=value] tags from AI response, apply them to persistent storage */
+  private processAiResponse(
+    text: string,
+    workdir: string,
+    channelId: string,
+    threadId: string
+  ): string {
+    const { clean, tags } = parseSaveTags(text)
+    for (const tag of tags) {
+      applySaveTag(tag, workdir, channelId, threadId)
+    }
+    return clean
+  }
+
+  // ── Inbound debounce ─────────────────────────────────────────────────────────
   private async handleMessage(message: InboundMessage): Promise<void> {
     const text = message.text.trim()
-
-    // Commands bypass debounce — process immediately
-    if (text.startsWith('/')) {
-      return this.processMessage(message)
-    }
+    if (text.startsWith('/')) return this.processMessage(message)
 
     const key = `${message.channelId}:${message.senderId}`
     const existing = this.debounceMap.get(key)
@@ -196,7 +195,6 @@ export class Gateway {
       }
     }
 
-    // Feature 5: 👀 reaction — message received and will be processed
     await message.setReaction?.('👀').catch(() => {})
 
     // ── Built-in commands ─────────────────────────────────────────────────────
@@ -276,7 +274,6 @@ export class Gateway {
     const schedMatch = CMD_SCHEDULE.exec(text)
     if (schedMatch) { await this.handleScheduleCommand(message, schedMatch[1]); return }
 
-    // ── Pairing management (owner only) ───────────────────────────────────────
     const approveMatch = CMD_APPROVE.exec(text)
     if (approveMatch) {
       if (!this.isOwner(message.channelId, message.senderId)) {
@@ -318,7 +315,6 @@ export class Gateway {
       return
     }
 
-    // ── Anthropic OAuth login ─────────────────────────────────────────────────
     if (CMD_LOGIN.test(text)) {
       if (!this.isOwner(message.channelId, message.senderId)) {
         await channel.send({ threadId: message.threadId, text: 'Only the bot owner can run this command.' })
@@ -329,18 +325,7 @@ export class Gateway {
       this.pendingOAuth.set(oauthKey, { verifier, createdAt: Date.now() })
       await channel.send({
         threadId: message.threadId,
-        text: [
-          'Claude Account Login',
-          '',
-          '1. Open this URL and sign in with your Claude account:',
-          url,
-          '',
-          '2. After authorizing, you will see a code on the page.',
-          '3. Send it back here with:',
-          '/opencode-code <paste-the-code>',
-          '',
-          'This links your Claude account to the bot.',
-        ].join('\n'),
+        text: ['Claude Account Login', '', '1. Open this URL and sign in:', url, '', '2. Send the code back with:', '/opencode-code <paste-the-code>'].join('\n'),
       })
       return
     }
@@ -353,10 +338,7 @@ export class Gateway {
       }
       const oauthKey = `${message.channelId}:${message.senderId}`
       const pending = this.pendingOAuth.get(oauthKey)
-      if (!pending) {
-        await channel.send({ threadId: message.threadId, text: 'No pending login. Run /opencode-login first.' })
-        return
-      }
+      if (!pending) { await channel.send({ threadId: message.threadId, text: 'No pending login. Run /opencode-login first.' }); return }
       if (Date.now() - pending.createdAt > 10 * 60 * 1000) {
         this.pendingOAuth.delete(oauthKey)
         await channel.send({ threadId: message.threadId, text: 'Login expired. Run /opencode-login again.' })
@@ -369,41 +351,29 @@ export class Gateway {
         saveResult(result)
         if (result.type === 'api_key') {
           process.env.ANTHROPIC_API_KEY = result.apiKey
-          await channel.send({
-            threadId: message.threadId,
-            text: `Claude API key created and saved!\nModel: ${process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'}\nKey: ...${result.apiKey.slice(-8)}\n\nYour Claude account is now linked. Delete this message for security.`,
-          })
+          await channel.send({ threadId: message.threadId, text: `Claude API key saved!\nKey: ...${result.apiKey.slice(-8)}\n\nDelete this message for security.` })
         } else {
-          await channel.send({
-            threadId: message.threadId,
-            text: 'Claude OAuth tokens saved!\n\nOpenCode is now authenticated with your Claude account.\nChat and code tasks will use it via OpenCode.',
-          })
+          await channel.send({ threadId: message.threadId, text: 'Claude OAuth tokens saved! OpenCode is now authenticated.' })
         }
       } catch (e) {
-        log.error('[opencode-login] exchange failed:', e)
         await channel.send({ threadId: message.threadId, text: `Login failed: ${e instanceof Error ? e.message : e}` })
       }
       return
     }
 
-    // ── Copilot commands ───────────────────────────────────────────────────────
     if (CMD_COPILOT.test(text)) {
       if (!this.isOwner(message.channelId, message.senderId)) {
-        await channel.send({ threadId: message.threadId, text: 'Only the bot owner can configure Copilot.' })
-        return
+        await channel.send({ threadId: message.threadId, text: 'Only the bot owner can configure Copilot.' }); return
       }
       await channel.send({ threadId: message.threadId, text: 'Starting GitHub Copilot login...\n(check the server terminal for the device code)' })
-      githubCopilotLogin().then(() => {
-        channel.send({ threadId: message.threadId, text: 'GitHub Copilot connected!' }).catch(() => {})
-      }).catch((e) => {
-        channel.send({ threadId: message.threadId, text: `Copilot login failed: ${e}` }).catch(() => {})
-      })
+      githubCopilotLogin()
+        .then(() => channel.send({ threadId: message.threadId, text: 'GitHub Copilot connected!' }).catch(() => {}))
+        .catch((e) => channel.send({ threadId: message.threadId, text: `Copilot login failed: ${e}` }).catch(() => {}))
       return
     }
 
     if (CMD_COPILOT_STATUS.test(text)) {
-      const configured = isCopilotConfigured()
-      if (!configured) {
+      if (!isCopilotConfigured()) {
         await channel.send({ threadId: message.threadId, text: 'Copilot not configured. Run /copilot-login first.' })
       } else {
         const creds = await resolveCopilotCredentials().catch(() => null)
@@ -422,35 +392,15 @@ export class Gateway {
       const CLAUDE_MODELS = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5-20251001']
       const COPILOT_MODELS = ['claude-sonnet-4.6', 'gpt-4o', 'gpt-4.1', 'gpt-4.1-mini', 'o3-mini']
       const usingCopilot = isCopilotConfigured() && !isClaudeConfigured()
-
       if (!modelMatch[1]) {
         const current = process.env.HYDRA_CLAUDE_MODEL ?? (usingCopilot ? 'claude-sonnet-4.6' : 'claude-sonnet-4-6')
         const fmt = (m: string) => m === current ? `${m} (current)` : m
-        await channel.send({
-          threadId: message.threadId,
-          text: [
-            `Current model: ${current}`,
-            '',
-            'Anthropic API:',
-            CLAUDE_MODELS.map(fmt).join('\n'),
-            '',
-            'GitHub Copilot (requires /copilot-login):',
-            COPILOT_MODELS.map(fmt).join('\n'),
-            '',
-            'Switch with /model <name>',
-          ].join('\n'),
-        })
+        await channel.send({ threadId: message.threadId, text: [`Current model: ${current}`, '', 'Anthropic API:', ...CLAUDE_MODELS.map(fmt), '', 'GitHub Copilot:', ...COPILOT_MODELS.map(fmt), '', 'Switch with /model <name>'].join('\n') })
         return
       }
-
       const requested = modelMatch[1].toLowerCase()
-      const match = [...CLAUDE_MODELS, ...COPILOT_MODELS].find(
-        (m) => m.toLowerCase() === requested || m.toLowerCase().includes(requested)
-      )
-      if (!match) {
-        await channel.send({ threadId: message.threadId, text: `Unknown model ${requested}\nRun /model to see available models.` })
-        return
-      }
+      const match = [...CLAUDE_MODELS, ...COPILOT_MODELS].find((m) => m.toLowerCase() === requested || m.toLowerCase().includes(requested))
+      if (!match) { await channel.send({ threadId: message.threadId, text: `Unknown model ${requested}` }); return }
       process.env.HYDRA_CLAUDE_MODEL = match
       const prefPath = path.join(os.homedir(), '.hydra', 'preferences.json')
       let prefs: Record<string, string> = {}
@@ -458,24 +408,20 @@ export class Gateway {
       prefs.HYDRA_CLAUDE_MODEL = match
       fs.mkdirSync(path.dirname(prefPath), { recursive: true })
       fs.writeFileSync(prefPath, JSON.stringify(prefs, null, 2))
-      await channel.send({ threadId: message.threadId, text: `Switched to ${match}\nAll new messages will use this model.` })
+      await channel.send({ threadId: message.threadId, text: `Switched to ${match}` })
       return
     }
 
     const claudeKeyMatch = CMD_CLAUDE_KEY.exec(text)
     if (claudeKeyMatch) {
       if (!this.isOwner(message.channelId, message.senderId)) {
-        await channel.send({ threadId: message.threadId, text: 'Only the bot owner can set the API key.' })
-        return
+        await channel.send({ threadId: message.threadId, text: 'Only the bot owner can set the API key.' }); return
       }
       const key = claudeKeyMatch[1].trim()
-      if (!key.startsWith('sk-ant-')) {
-        await channel.send({ threadId: message.threadId, text: 'Invalid key format — should start with sk-ant-' })
-        return
-      }
+      if (!key.startsWith('sk-ant-')) { await channel.send({ threadId: message.threadId, text: 'Invalid key format — should start with sk-ant-' }); return }
       saveApiKey(key)
       process.env.ANTHROPIC_API_KEY = key
-      await channel.send({ threadId: message.threadId, text: `Claude API key saved!\nModel: ${process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'}\nKey ends in: ...${key.slice(-6)}\n\nDelete this message for security.` })
+      await channel.send({ threadId: message.threadId, text: `Claude API key saved! Key ends in: ...${key.slice(-6)}\n\nDelete this message for security.` })
       return
     }
 
@@ -484,14 +430,10 @@ export class Gateway {
       if (isClaudeConfigured()) {
         await channel.send({ threadId: message.threadId, text: `Claude active (API key)\nModel: ${model}\nKey: ...${process.env.ANTHROPIC_API_KEY!.slice(-6)}` })
       } else if (hasOpencodeAuth()) {
-        await channel.send({ threadId: message.threadId, text: `Claude OAuth tokens active (via opencode)\nModel: ${model}\nOpenCode will use your Claude account for code tasks.` })
+        await channel.send({ threadId: message.threadId, text: `Claude OAuth tokens active (via opencode)\nModel: ${model}` })
       } else {
         const oauthToken = getValidClaudeToken()
-        if (oauthToken) {
-          await channel.send({ threadId: message.threadId, text: 'Claude OAuth token found but cannot call API directly.\nRun /opencode-login to link your Claude account.' })
-        } else {
-          await channel.send({ threadId: message.threadId, text: 'No Claude credentials\n• Run /opencode-login — log in with your Claude account\n• Or /claude-key sk-ant-... — paste a key directly' })
-        }
+        await channel.send({ threadId: message.threadId, text: oauthToken ? 'OAuth token found but cannot call API directly.\nRun /opencode-login.' : 'No Claude credentials\n• /opencode-login — log in with Claude\n• /claude-key sk-ant-... — paste a key' })
       }
       return
     }
@@ -502,33 +444,27 @@ export class Gateway {
       return
     }
 
-    // ── Phase 9: cross-channel ────────────────────────────────────────────────
     const linkMatch = CMD_LINK.exec(text)
     if (linkMatch) {
       const accountId = linkMatch[1] ?? `${message.channelId}:${message.senderId}`
       this.sessions.linkAccount(message.channelId, message.senderId, accountId)
-      await channel.send({ threadId: message.threadId, text: `Linked! Your account ID: ${accountId}\nUse this same ID with /link in other channels to share sessions.` })
+      await channel.send({ threadId: message.threadId, text: `Linked! Account ID: ${accountId}` })
       return
     }
 
     const handoffMatch = CMD_HANDOFF.exec(text)
     if (handoffMatch) {
-      const targetChannelId = handoffMatch[1]
-      const targetChannel = this.registry.get(targetChannelId as any)
-      if (!targetChannel) {
-        await channel.send({ threadId: message.threadId, text: `Channel ${targetChannelId} not found.` })
-        return
-      }
+      const targetChannel = this.registry.get(handoffMatch[1] as any)
+      if (!targetChannel) { await channel.send({ threadId: message.threadId, text: `Channel ${handoffMatch[1]} not found.` }); return }
       const session = this.sessions.getOrCreate(message)
       const summary = session.opencodeSessionId
         ? `Session handoff from ${message.channelId}\nSession: ${session.opencodeSessionId}\nWorkdir: ${session.workdir}`
         : `Handoff from ${message.channelId} — no active session yet.`
       await targetChannel.send({ threadId: message.threadId, text: summary })
-      await channel.send({ threadId: message.threadId, text: `Session summary sent to ${targetChannelId}.` })
+      await channel.send({ threadId: message.threadId, text: `Summary sent to ${handoffMatch[1]}.` })
       return
     }
 
-    // ── Phase 10: worktree commands ───────────────────────────────────────────
     if (CMD_DIFF.test(text)) {
       const session = this.sessions.getOrCreate(message)
       const diff = await getWorktreeDiff(session.workdir)
@@ -539,18 +475,13 @@ export class Gateway {
 
     if (CMD_ROLLBACK.test(text)) {
       const session = this.sessions.getOrCreate(message)
-      const result = await rollbackWorktree(session.workdir)
-      await channel.send({ threadId: message.threadId, text: result })
+      await channel.send({ threadId: message.threadId, text: await rollbackWorktree(session.workdir) })
       return
     }
 
     const prMatch = PR_PATTERN.exec(text)
-    if (prMatch && this.config.worktrees) {
-      await this.handlePRCheckout(message, parseInt(prMatch[1], 10))
-      return
-    }
+    if (prMatch && this.config.worktrees) { await this.handlePRCheckout(message, parseInt(prMatch[1], 10)); return }
 
-    // ── Route by intent ───────────────────────────────────────────────────────
     await this.runAgentMessage(message)
   }
 
@@ -558,17 +489,13 @@ export class Gateway {
     const channel = this.registry.get(message.channelId)
     if (!channel) return
 
-    if (!hasAnyCredentials()) {
-      await channel.send({ threadId: message.threadId, text: NO_CREDS_MSG })
-      return
-    }
+    if (!hasAnyCredentials()) { await channel.send({ threadId: message.threadId, text: NO_CREDS_MSG }); return }
 
     const session = this.sessions.getOrCreate(message)
     const { key } = session
 
     await this.sessions.ensureWorktree(session)
 
-    // Feature 2: ensure bootstrap workspace files exist
     ensureWorkspaceFiles(session.workdir, {
       channelId: message.channelId,
       senderId: message.senderId,
@@ -577,7 +504,6 @@ export class Gateway {
       timezone: process.env.HYDRA_USER_TIMEZONE,
     })
 
-    // Feature 6: register heartbeat target on first active message
     this.heartbeat.register({
       channelId: message.channelId,
       threadId: message.threadId,
@@ -585,9 +511,14 @@ export class Gateway {
       workdir: session.workdir,
     })
 
-    const existing = this.activeRuns.get(key)
-    if (existing) { log.debug(`[${key}] Aborting previous run`); existing.abort() }
+    // Auto-detect self-updates from user's message (before asking AI)
+    const autoTags = detectAutoUpdates(message.text)
+    for (const tag of autoTags) {
+      applySaveTag(tag, session.workdir, message.channelId, message.threadId)
+    }
 
+    const existing = this.activeRuns.get(key)
+    if (existing) { existing.abort() }
     const ctrl = new AbortController()
     this.activeRuns.set(key, ctrl)
 
@@ -595,7 +526,6 @@ export class Gateway {
     const intent = classifyIntent(rawPrompt, !!(message.images?.length))
     const prompt = stripIntentPrefix(rawPrompt)
 
-    // Feature 3: message envelope with elapsed time
     const threadKey = `${message.channelId}:${message.threadId}`
     const lastAt = this.lastMessageAt.get(threadKey)
     const envelope = buildEnvelope(message.channelId, message.senderName, message.timestamp, lastAt)
@@ -604,7 +534,6 @@ export class Gateway {
     const goesToOpenCode = !(intent === 'fast' || (intent === 'chat' && (isClaudeConfigured() || isCopilotConfigured())))
     const memory = readMemory(message.channelId, message.threadId)
 
-    // Feature 1: structured system prompt with feature 10 owner ID hashing
     const promptMode = intent === 'computer' ? 'computer' : (goesToOpenCode ? 'code' : 'chat')
     const systemPrompt = buildSystemPrompt({
       mode: promptMode,
@@ -620,43 +549,27 @@ export class Gateway {
       includeToolHint: goesToOpenCode,
     })
 
-    // For OpenCode, build context prefix (injected into prompt body, not system prompt)
-    const contextPrefix = goesToOpenCode
-      ? buildMemoryPrompt(message.channelId, message.threadId, true)
-      : ''
-
+    const contextPrefix = goesToOpenCode ? buildMemoryPrompt(message.channelId, message.threadId, true) : ''
     const fullPrompt = `${envelope}\n${contextPrefix}${prompt}`
 
     log.info(`[${key}] intent=${intent} route=${goesToOpenCode ? 'opencode' : 'direct'} "${prompt.slice(0, 100)}"`)
-
-    // Feature 5: 🤔 reaction — processing started
     await message.setReaction?.('🤔').catch(() => {})
 
-    let reactionSet = false
     try {
-      // ── Computer-use ──────────────────────────────────────────────────────
       if (intent === 'computer') {
         await this.runComputerTask(message, fullPrompt, channel)
         await message.setReaction?.('👍').catch(() => {})
-        reactionSet = true
         return
       }
 
-      // ── Direct chat via Claude API key or Copilot ─────────────────────────
       if (!goesToOpenCode) {
-        await this.runDirectChat(message, fullPrompt, message.images, channel, systemPrompt)
+        await this.runDirectChat(message, fullPrompt, message.images, channel, systemPrompt, session.workdir)
         await message.setReaction?.('👍').catch(() => {})
-        reactionSet = true
         return
       }
 
-      // ── OpenCode session ───────────────────────────────────────────────────
       await channel.sendTyping(message.threadId)
-
-      const placeholderId = await channel.sendAndGetId({
-        threadId: message.threadId,
-        text: '⏳',
-      })
+      const placeholderId = await channel.sendAndGetId({ threadId: message.threadId, text: '⏳' })
 
       let accumulated = ''
       let lastEditAt = 0
@@ -679,13 +592,14 @@ export class Gateway {
 
       session.opencodeSessionId = result.sessionId
 
-      const finalText = (result.text || accumulated) + (result.error ? `\n\n⚠️ ${result.error}` : '')
+      let finalText = (result.text || accumulated) + (result.error ? `\n\n⚠️ ${result.error}` : '')
 
-      // Feature 4: suppress NO_REPLY and HEARTBEAT_OK silently
+      // Strip [SAVE:...] tags from OpenCode response and persist them
+      finalText = this.processAiResponse(finalText, session.workdir, message.channelId, message.threadId)
+
       if (finalText.trim() === NO_REPLY || finalText.trim() === HEARTBEAT_OK) {
         if (placeholderId) await channel.deleteMessage?.(message.threadId, placeholderId)
         await message.setReaction?.('👍').catch(() => {})
-        reactionSet = true
         return
       }
 
@@ -702,13 +616,11 @@ export class Gateway {
       }
 
       await message.setReaction?.('👍').catch(() => {})
-      reactionSet = true
 
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') return
       log.error(`[${key}] Error:`, err)
       await message.setReaction?.('👎').catch(() => {})
-      reactionSet = true
       await channel.send({ threadId: message.threadId, text: 'Something went wrong. Please try again.', replyToId: message.id }).catch(() => {})
     } finally {
       this.activeRuns.delete(key)
@@ -720,14 +632,17 @@ export class Gateway {
     prompt: string,
     images: string[] | undefined,
     channel: any,
-    systemPrompt?: string
+    systemPrompt: string | undefined,
+    workdir: string
   ): Promise<void> {
     const placeholderId = await channel.sendAndGetId({ threadId: message.threadId, text: '⏳' })
     try {
       const { callDirect } = await import('./copilot-chat.js')
-      const text = await callDirect(prompt, images, systemPrompt)
+      let text = await callDirect(prompt, images, systemPrompt)
 
-      // Feature 4: suppress NO_REPLY and HEARTBEAT_OK
+      // Strip [SAVE:...] tags and persist them
+      text = this.processAiResponse(text, workdir, message.channelId, message.threadId)
+
       if (text.trim() === NO_REPLY || text.trim() === HEARTBEAT_OK) {
         await channel.deleteMessage?.(message.threadId, placeholderId)
         return
@@ -749,9 +664,7 @@ export class Gateway {
       const result = await runComputerTask({
         instruction: prompt,
         maxIterations: 10,
-        onStatus: async (msg) => {
-          await channel.editMessage(message.threadId, placeholderId, `🖥️ ${msg}`).catch(() => {})
-        },
+        onStatus: async (msg) => { await channel.editMessage(message.threadId, placeholderId, `🖥️ ${msg}`).catch(() => {}) },
       })
       const summary = result.success ? `Done!\n${result.output}` : `Failed: ${result.output}`
       const stats = `\n(${result.iterations} steps, ${result.visionCallsUsed} vision calls)`
@@ -763,7 +676,6 @@ export class Gateway {
     }
   }
 
-  // ── Feature 6: Heartbeat callback ─────────────────────────────────────────
   private async fireHeartbeat(
     target: { channelId: string; threadId: string; senderId: string; workdir: string },
     _sendResponse: (text: string) => Promise<void>
@@ -771,10 +683,8 @@ export class Gateway {
     const channel = this.registry.get(target.channelId as any)
     if (!channel || !hasAnyCredentials()) return
 
-    log.info(`Firing heartbeat for ${target.channelId}:${target.threadId}`)
-
     const session = this.sessions.get(buildSessionKey(target.channelId, target.threadId))
-    if (!session) return // no active session — skip
+    if (!session) return
 
     const memory = readMemory(target.channelId, target.threadId)
     const systemPrompt = buildSystemPrompt({
@@ -794,23 +704,16 @@ export class Gateway {
       let response: string
 
       if (goesToOpenCode && session.opencodeSessionId) {
-        const result = await runSession({
-          sessionId: session.opencodeSessionId,
-          directory: target.workdir,
-          prompt: HEARTBEAT_PROMPT,
-        })
+        const result = await runSession({ sessionId: session.opencodeSessionId, directory: target.workdir, prompt: HEARTBEAT_PROMPT })
         response = result.text
       } else {
         const { callDirect } = await import('./copilot-chat.js')
         response = await callDirect(HEARTBEAT_PROMPT, undefined, systemPrompt)
       }
 
+      response = this.processAiResponse(response, target.workdir, target.channelId, target.threadId)
       const trimmed = response.trim()
-      if (trimmed === HEARTBEAT_OK || trimmed === NO_REPLY || !trimmed) {
-        log.debug(`Heartbeat suppressed for ${target.channelId}:${target.threadId}`)
-        return
-      }
-
+      if (trimmed === HEARTBEAT_OK || trimmed === NO_REPLY || !trimmed) return
       await channel.send({ threadId: target.threadId, text: response })
     } catch (e) {
       log.warn(`Heartbeat failed: ${e}`)
@@ -827,9 +730,7 @@ export class Gateway {
     } else {
       scheduleStr = parts.slice(0, 5).join(' '); promptStr = parts.slice(5).join(' ')
     }
-    if (!promptStr.trim()) {
-      await channel.send({ threadId: message.threadId, text: 'Usage: /schedule <cron|ISO> <prompt>' }); return
-    }
+    if (!promptStr.trim()) { await channel.send({ threadId: message.threadId, text: 'Usage: /schedule <cron|ISO> <prompt>' }); return }
     const id = `task_${Date.now()}`
     this.scheduler.add({
       id, channelId: message.channelId, threadId: message.threadId, prompt: promptStr,
@@ -844,17 +745,12 @@ export class Gateway {
     const placeholderId = await channel.sendAndGetId({ threadId: message.threadId, text: `⏳ Checking out PR #${prNumber}...` })
     try {
       const result = await createFromPR({ baseDirectory: this.config.workdir, prNumber })
-      if (result instanceof Error) {
-        await channel.editMessage(message.threadId, placeholderId, `PR checkout failed: ${result.message}`).catch(() => {})
-        return
-      }
+      if (result instanceof Error) { await channel.editMessage(message.threadId, placeholderId, `PR checkout failed: ${result.message}`).catch(() => {}); return }
       const session = this.sessions.getOrCreate(message)
       session.worktree = result
       session.workdir = result.directory
       this.heartbeat.updateWorkdir(message.channelId, message.threadId, result.directory)
-      await channel.editMessage(message.threadId, placeholderId,
-        `PR #${prNumber} checked out!\nBranch: ${result.branch}\nWorkdir: ${result.directory}\n\nNow send your instructions.`
-      ).catch(() => {})
+      await channel.editMessage(message.threadId, placeholderId, `PR #${prNumber} checked out!\nBranch: ${result.branch}\nWorkdir: ${result.directory}`).catch(() => {})
     } catch (e) {
       await channel.editMessage(message.threadId, placeholderId, `Error: ${e}`).catch(() => {})
     }

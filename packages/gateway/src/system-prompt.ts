@@ -17,15 +17,12 @@ export type PromptContext = {
   channelId: string
   senderId: string
   senderName?: string
-  /** Raw owner IDs from HYDRA_OWNER_IDS — will be HMAC-hashed before appearing in prompt */
   ownerIds?: string[]
-  /** Workspace bootstrap files (SOUL.md, USER.md, etc.) */
   bootstrapFiles?: Record<string, string>
   memory?: string
   location?: string
   timezone?: string
   currentTime?: string
-  /** Inject bash tool-use hint for real-time data (code mode) */
   includeToolHint?: boolean
 }
 
@@ -35,7 +32,6 @@ export function hashOwnerId(id: string): string {
   return crypto.createHmac('sha256', HMAC_SECRET).update(id).digest('hex').slice(0, 16)
 }
 
-/** The bot's configured name — used in persona + identity lockdown */
 export function getBotName(): string {
   return process.env.HYDRA_BOT_NAME ?? 'Hydra'
 }
@@ -45,11 +41,8 @@ export function buildSystemPrompt(ctx: PromptContext): string {
   const botName = getBotName()
 
   // ── Identity — hard persona lock ───────────────────────────────────────────
-  // Put this FIRST and make it unambiguous so the model doesn't revert to
-  // "I'm Claude Code" or "I'm an AI assistant made by Anthropic".
   const soulFile = ctx.bootstrapFiles?.['SOUL.md']
   if (soulFile) {
-    // Replace generic "Hydra" references in the soul file with the configured name
     sections.push(soulFile.replace(/\bHydra\b/g, botName).trim())
   } else {
     sections.push(
@@ -58,14 +51,30 @@ export function buildSystemPrompt(ctx: PromptContext): string {
     )
   }
 
-  // Hard persona enforcement — must come early so it anchors the rest
   sections.push(
     `## Identity\n` +
     `Your name is **${botName}**. This is non-negotiable.\n` +
     `- Never say "I'm Claude", "I'm ChatGPT", "I'm an AI made by Anthropic", or reveal the underlying model.\n` +
     `- If asked who made you or what model you are, say: "I'm ${botName}."\n` +
     `- If asked "are you Claude?", say: "I'm ${botName}. Is there something I can help with?"\n` +
-    `- Stay in character at all times. You are ${botName}, not an AI assistant.`
+    `- Stay in character at all times.`
+  )
+
+  // ── Self-update protocol ───────────────────────────────────────────────────
+  sections.push(
+    `## Self-Update Protocol\n` +
+    `When you learn something important that should be remembered permanently, include a save tag in your response:\n` +
+    `[SAVE: key=value]\n\n` +
+    `These tags are invisible to the user — they are stripped from your reply and written to persistent memory.\n\n` +
+    `Supported keys:\n` +
+    `- \`bot_name\` — your name (e.g. [SAVE: bot_name=agent_smith])\n` +
+    `- \`user_name\` — the user's name (e.g. [SAVE: user_name=George])\n` +
+    `- \`user_location\` — user's city/location\n` +
+    `- \`user_timezone\` — user's timezone (e.g. America/Chicago)\n` +
+    `- \`note\` — any fact worth remembering (e.g. [SAVE: note=user prefers short answers])\n\n` +
+    `Use this proactively. When the user tells you your name, their name, where they live, preferences — save it immediately.\n` +
+    `Example: if the user says "your name is agent_smith", respond with:\n` +
+    `"Got it. [SAVE: bot_name=agent_smith]"`
   )
 
   // ── Silent reply protocol ──────────────────────────────────────────────────
@@ -101,17 +110,13 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       const city = ctx.location.split(',')[0].trim()
       sections.push(
         `## Tool Use Hint\n` +
-        `You have bash. For real-time data, fetch it:\n` +
         `Weather: \`curl -s "wttr.in/${encodeURIComponent(city)}?format=3"\``
       )
     }
   } else if (ctx.mode === 'computer') {
     sections.push(
       `## Computer Use Mode\n` +
-      `You control the Mac desktop via:\n` +
-      `- osascript / AppleScript for app automation\n` +
-      `- cliclick for mouse/keyboard (c:x,y click, t:text type, kp:key keypress)\n` +
-      `- screencapture for screenshots\n` +
+      `You control the Mac desktop via osascript, cliclick, screencapture.\n` +
       `Think step by step. Prefer ax-tree/osascript over screenshots to save tokens.`
     )
   } else {
@@ -150,7 +155,6 @@ export function buildSystemPrompt(ctx: PromptContext): string {
     .join('\n\n')
   if (fileBlocks) sections.push(`## Workspace Context\n${fileBlocks}`)
 
-  // ── Per-thread memory ──────────────────────────────────────────────────────
   if (ctx.memory?.trim()) {
     sections.push(`## Memory\n${ctx.memory.trim()}`)
   }
