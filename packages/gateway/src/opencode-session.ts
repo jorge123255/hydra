@@ -59,7 +59,6 @@ function buildParts(prompt: string, images?: string[]): Array<TextPartInput | Fi
   const parts: Array<TextPartInput | FilePartInput> = [{ type: 'text', text: prompt }]
   if (images?.length) {
     for (const dataUrl of images) {
-      // Parse mime from data:image/jpeg;base64,...
       const mime = dataUrl.match(/^data:([^;]+);base64,/)?.[1] ?? 'image/jpeg'
       parts.push({ type: 'file', mime, url: dataUrl } as FilePartInput)
     }
@@ -130,20 +129,37 @@ export async function runSession(opts: RunOptions): Promise<RunResult> {
   }
   if (promptError) throw promptError
 
-  // Stream response — call onChunk as text parts arrive (Phase 4B)
+  // Stream response.
+  // message.updated tells us which messageIDs have role=assistant.
+  // message.part.updated carries the full current text of each part (streaming updates replace, not append).
+  // We collect partId -> text for all parts, then at the end filter to assistant-only messageIDs.
+  // For onChunk streaming we emit optimistically once we know a part belongs to an assistant message.
   const subscribeResp = await client.event.subscribe({ directory }, { signal } as any)
 
-  const outputParts: string[] = []
+  // messageID -> role
+  const messageRoles = new Map<string, 'user' | 'assistant'>()
+  // partID -> { messageID, text } — ALL parts (filtered at end)
+  const allParts = new Map<string, { messageID: string; text: string }>()
   let error: string | undefined
-  let accumulated = ''
   let lastChunkAt = 0
 
-  // Debounced chunk emitter: fire if >800ms since last OR chunk is large
+  const getAssistantText = (): string => {
+    const assistantPartTexts: string[] = []
+    for (const [, { messageID, text }] of allParts) {
+      if (messageRoles.get(messageID) === 'assistant') {
+        assistantPartTexts.push(text)
+      }
+    }
+    return assistantPartTexts.join('')
+  }
+
   async function maybeEmitChunk(force = false): Promise<void> {
-    if (!onChunk || !accumulated) return
+    if (!onChunk) return
+    const text = getAssistantText()
+    if (!text) return
     const now = Date.now()
-    if (force || now - lastChunkAt > 800 || accumulated.length > 300) {
-      await onChunk(accumulated).catch(() => {})
+    if (force || now - lastChunkAt > 800 || text.length > 300) {
+      await onChunk(text).catch(() => {})
       lastChunkAt = now
     }
   }
@@ -152,12 +168,24 @@ export async function runSession(opts: RunOptions): Promise<RunResult> {
     for await (const event of (subscribeResp as any).stream ?? []) {
       if (signal?.aborted) break
 
+      if (event.type === 'message.updated') {
+        const info = event.properties?.info
+        if (info?.id && (info.role === 'assistant' || info.role === 'user')) {
+          messageRoles.set(info.id, info.role)
+          // If new assistant parts became available due to this role update, emit
+          if (info.role === 'assistant') await maybeEmitChunk()
+        }
+      }
+
       if (event.type === 'message.part.updated') {
         const part = event.properties?.part
-        if (part?.type === 'text' && typeof part.text === 'string' && part.text) {
-          outputParts.push(part.text)
-          accumulated = outputParts.join('')
-          await maybeEmitChunk()
+        if (part?.type === 'text' && typeof part.text === 'string' && part.text && part.id) {
+          const msgId: string = (part as any).messageID ?? ''
+          // Replace with latest full text of this part
+          allParts.set(part.id, { messageID: msgId, text: part.text })
+          if (messageRoles.get(msgId) === 'assistant') {
+            await maybeEmitChunk()
+          }
         }
       }
 
@@ -188,9 +216,8 @@ export async function runSession(opts: RunOptions): Promise<RunResult> {
     }
   }
 
-  // Emit any remaining buffered text
   await maybeEmitChunk(true)
 
-  const finalText = outputParts.join('')
+  const finalText = getAssistantText()
   return { sessionId, text: finalText, error, compacted: didCompact }
 }
