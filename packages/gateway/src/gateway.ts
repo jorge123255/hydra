@@ -18,6 +18,7 @@ import { createLogger } from './logger.js'
 import { isAllowed, upsertPairingRequest, approvePairing, revokePairing, listPendingRequests } from './pairing.js'
 import { classifyIntent, stripIntentPrefix } from './router.js'
 import { isCopilotConfigured, isClaudeConfigured, isClaudeOAuthAvailable, getValidClaudeToken, githubCopilotLogin, resolveCopilotCredentials, getVisionUsageStatus, callDirect } from './copilot-chat.js'
+import { buildAuthUrl, exchangeCodeForKey, saveApiKey, type PendingOAuth } from './auth/anthropic-oauth.js'
 import { createFromPR, getWorktreeDiff, rollbackWorktree } from './worktree-manager.js'
 
 const log = createLogger('gateway')
@@ -48,6 +49,8 @@ const CMD_HANDOFF    = /^\/handoff\s+(\S+)/i              // /handoff {channelId
 const CMD_DIFF       = /^\/diff$/i
 const CMD_ROLLBACK   = /^\/rollback$/i
 const PR_PATTERN     = /\bpr\s*#(\d+)/i                  // auto-detect "PR #42" in messages
+const CMD_LOGIN      = /^\/opencode-login$/i              // start Anthropic OAuth flow
+const CMD_CODE       = /^\/opencode-code\s+(\S+)/i        // /opencode-code <paste-code>
 
 export class Gateway {
   private registry: ChannelRegistry
@@ -56,6 +59,8 @@ export class Gateway {
   private sweepTimer?: NodeJS.Timeout
   private activeRuns = new Map<string, AbortController>()
   private scheduler: Scheduler
+  // Pending OAuth flows: key = `${channelId}:${senderId}`
+  private pendingOAuth = new Map<string, PendingOAuth>()
 
   constructor(registry: ChannelRegistry, config: GatewayConfig) {
     this.registry = registry
@@ -127,11 +132,13 @@ export class Gateway {
           '`/approve <channelId> <code>` — approve a pairing request',
           '`/revoke <channelId> <userId>` — revoke access',
           '`/pending [channelId]` — list pending pairing requests',
-          '`/copilot-login` — connect GitHub Copilot (free claude-sonnet-4.6)',
+          '`/opencode-login` — connect Claude account (OAuth, owner only)',
+          '`/opencode-code <code>` — complete Claude OAuth login',
+          '`/claude-key <sk-ant-...>` — set Anthropic API key directly (owner only)',
+          '`/claude-status` — check auth status',
+          '`/copilot-login` — connect GitHub Copilot',
           '`/copilot-status` — check Copilot auth status',
           '`/model [name]` — show or switch AI model',
-          '`/claude-key <sk-ant-...>` — set Anthropic API key (owner only, DM only)',
-          '`/claude-status` — check Anthropic API key status',
           '`/vision-usage` — check vision budget usage',
           '`/link [accountId]` — link your identity for cross-channel sessions',
           '`/handoff <channelId>` — send session summary to another channel',
@@ -222,6 +229,76 @@ export class Gateway {
       return
     }
 
+    // ── Anthropic OAuth login (Phase 6A alternative) ─────────────────────────
+    if (CMD_LOGIN.test(text)) {
+      if (!this.isOwner(message.channelId, message.senderId)) {
+        await channel.send({ threadId: message.threadId, text: '❌ Only the bot owner can run this command.' })
+        return
+      }
+      const { url, verifier } = buildAuthUrl()
+      const oauthKey = `${message.channelId}:${message.senderId}`
+      this.pendingOAuth.set(oauthKey, { verifier, createdAt: Date.now() })
+      await channel.send({
+        threadId: message.threadId,
+        text: [
+          '🔐 **Claude Account Login**',
+          '',
+          '1. Open this URL and sign in with your Claude account:',
+          `\`${url}\``,
+          '',
+          '2. After authorizing, you\'ll see an authorization code on the page.',
+          '3. Send it back here:',
+          '`/opencode-code <paste-the-code>`',
+          '',
+          '_This creates a real API key linked to your Claude account._',
+        ].join('\n'),
+      })
+      return
+    }
+
+    const codeMatch = CMD_CODE.exec(text)
+    if (codeMatch) {
+      if (!this.isOwner(message.channelId, message.senderId)) {
+        await channel.send({ threadId: message.threadId, text: '❌ Only the bot owner can run this command.' })
+        return
+      }
+      const oauthKey = `${message.channelId}:${message.senderId}`
+      const pending = this.pendingOAuth.get(oauthKey)
+      if (!pending) {
+        await channel.send({ threadId: message.threadId, text: '❌ No pending login. Run `/opencode-login` first.' })
+        return
+      }
+      // Expire after 10 minutes
+      if (Date.now() - pending.createdAt > 10 * 60 * 1000) {
+        this.pendingOAuth.delete(oauthKey)
+        await channel.send({ threadId: message.threadId, text: '❌ Login expired. Run `/opencode-login` again.' })
+        return
+      }
+
+      await channel.send({ threadId: message.threadId, text: '⏳ Exchanging code for API key...' })
+
+      try {
+        const apiKey = await exchangeCodeForKey(codeMatch[1], pending.verifier)
+        this.pendingOAuth.delete(oauthKey)
+        saveApiKey(apiKey)
+        process.env.ANTHROPIC_API_KEY = apiKey
+        await channel.send({
+          threadId: message.threadId,
+          text: [
+            '✅ **Claude API key created and saved!**',
+            `Model: \`${process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'}\``,
+            `Key: \`...${apiKey.slice(-8)}\``,
+            '',
+            '_Your Claude account is now linked. OpenCode will use it too._',
+          ].join('\n'),
+        })
+      } catch (e) {
+        log.error('[opencode-login] exchange failed:', e)
+        await channel.send({ threadId: message.threadId, text: `❌ Login failed: ${e instanceof Error ? e.message : e}` })
+      }
+      return
+    }
+
     // ── Copilot commands ──────────────────────────────────────────────────────
     if (CMD_COPILOT.test(text)) {
       if (!this.isOwner(message.channelId, message.senderId)) {
@@ -230,7 +307,7 @@ export class Gateway {
       }
       await channel.send({ threadId: message.threadId, text: '🔗 Starting GitHub Copilot login...\n(check the server terminal for the device code)' })
       githubCopilotLogin().then(() => {
-        channel.send({ threadId: message.threadId, text: '✅ GitHub Copilot connected! Now using claude-sonnet-4.6 for free.' }).catch(() => {})
+        channel.send({ threadId: message.threadId, text: '✅ GitHub Copilot connected!' }).catch(() => {})
       }).catch((e) => {
         channel.send({ threadId: message.threadId, text: `❌ Copilot login failed: ${e}` }).catch(() => {})
       })
@@ -255,7 +332,7 @@ export class Gateway {
 
     const modelMatch = CMD_MODEL.exec(text)
     if (modelMatch) {
-      // Anthropic API models (used when ANTHROPIC_API_KEY or Claude Code OAuth)
+      // Anthropic API models (used when ANTHROPIC_API_KEY is set)
       const CLAUDE_MODELS = [
         'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5-20251001',
       ]
@@ -272,13 +349,13 @@ export class Gateway {
         const text = [
           `**Current model:** \`${current}\``,
           '',
-          '**Anthropic API / Claude Code OAuth:**',
+          '**Anthropic API:**',
           anthropicList,
           '',
           '**GitHub Copilot** _(requires /copilot-login)_:',
           copilotList,
           '',
-          'Switch with \`/model <name>\`',
+          'Switch with `/model <name>`',
         ].join('\n')
         await channel.send({ threadId: message.threadId, text })
         return
@@ -293,7 +370,7 @@ export class Gateway {
       }
 
       process.env.HYDRA_CLAUDE_MODEL = match
-      // Persist to credentials file so it survives restarts
+      // Persist to preferences file so it survives restarts
       const fs2 = await import('node:fs')
       const path2 = await import('node:path')
       const os2 = await import('node:os')
@@ -318,30 +395,23 @@ export class Gateway {
         await channel.send({ threadId: message.threadId, text: '❌ Invalid key format — should start with `sk-ant-`' })
         return
       }
-      // Save to credentials file and update process.env for this run
-      const fs = await import('node:fs')
-      const path = await import('node:path')
-      const os = await import('node:os')
-      const credDir = path.join(os.homedir(), '.hydra', 'credentials')
-      fs.mkdirSync(credDir, { recursive: true })
-      fs.writeFileSync(path.join(credDir, 'anthropic.json'), JSON.stringify({ key, savedAt: new Date().toISOString() }, null, 2))
+      // Save to both ~/.hydra/credentials/anthropic.json and opencode auth.json
+      saveApiKey(key)
       process.env.ANTHROPIC_API_KEY = key
-      await channel.send({ threadId: message.threadId, text: `✅ Claude API key saved!\nModel: \`${process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-5'}\`\nKey ends in: \`...${key.slice(-6)}\`\n\n_Delete this message for security._` })
+      await channel.send({ threadId: message.threadId, text: `✅ Claude API key saved!\nModel: \`${process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'}\`\nKey ends in: \`...${key.slice(-6)}\`\n\n_Delete this message for security._` })
       return
     }
 
     if (CMD_CLAUDE_STATUS.test(text)) {
-      const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-5'
+      const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'
       if (process.env.ANTHROPIC_API_KEY) {
         await channel.send({ threadId: message.threadId, text: `✅ Claude active (API key)\nModel: \`${model}\`\nKey: \`...${process.env.ANTHROPIC_API_KEY.slice(-6)}\`` })
       } else {
         const oauthToken = getValidClaudeToken()
         if (oauthToken) {
-          await channel.send({ threadId: message.threadId, text: `✅ Claude active (Claude Code OAuth)\nModel: \`${model}\`\nToken: \`...${oauthToken.slice(-8)}\`` })
-        } else if (isClaudeOAuthAvailable()) {
-          await channel.send({ threadId: message.threadId, text: `⚠️ Claude OAuth token found but expired\nOpen Claude Code once to refresh it, then retry.` })
+          await channel.send({ threadId: message.threadId, text: `⚠️ Claude OAuth token found but it cannot call the API directly.\nRun \`/opencode-login\` to create a real API key from your account.` })
         } else {
-          await channel.send({ threadId: message.threadId, text: '❌ No Claude credentials\nOptions:\n• Run \`/claude-key sk-ant-...\` to set API key\n• Or log into Claude Code on bob — token is shared automatically' })
+          await channel.send({ threadId: message.threadId, text: '❌ No Claude credentials\nOptions:\n• Run `/opencode-login` to log in with your Claude account\n• Or send `/claude-key sk-ant-...` to paste a key directly' })
         }
       }
       return
@@ -435,7 +505,7 @@ export class Gateway {
         return
       }
 
-      // ── Fast chat via Copilot (Phase 6B) ─────────────────────────────────
+      // ── Fast chat via Claude/Copilot (Phase 6B) ───────────────────────────
       if (intent === 'fast' || (intent === 'chat' && (isClaudeConfigured() || isCopilotConfigured()))) {
         await this.runCopilotChat(message, fullPrompt, message.images, channel)
         return
