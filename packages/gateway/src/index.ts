@@ -14,6 +14,15 @@ import { createLogger } from './logger.js'
 const log = createLogger('main')
 
 // Load saved credentials that aren't in .env
+function loadSavedPreferences() {
+  try {
+    const prefs = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.hydra', 'preferences.json'), 'utf8'))
+    for (const [k, v] of Object.entries(prefs)) {
+      if (!process.env[k]) process.env[k] = v as string
+    }
+  } catch {}
+}
+
 function loadSavedCredentials() {
   const credDir = path.join(os.homedir(), '.hydra', 'credentials')
   // Anthropic API key saved via /claude-key command
@@ -30,6 +39,7 @@ function loadSavedCredentials() {
 
 async function main() {
   loadSavedCredentials()
+  loadSavedPreferences()
 
   const registry = new ChannelRegistry()
 

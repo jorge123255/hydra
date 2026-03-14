@@ -41,6 +41,7 @@ const CMD_COPILOT    = /^\/copilot-login$/i
 const CMD_COPILOT_STATUS = /^\/copilot-status$/i
 const CMD_CLAUDE_STATUS  = /^\/claude-status$/i
 const CMD_CLAUDE_KEY     = /^\/claude-key\s+(\S+)/i   // /claude-key sk-ant-...
+const CMD_MODEL          = /^\/model(?:\s+(\S+))?$/i     // /model [name]
 const CMD_VISION_USAGE = /^\/vision-usage$/i
 const CMD_LINK       = /^\/link(?:\s+(\S+))?$/i          // /link [accountId]
 const CMD_HANDOFF    = /^\/handoff\s+(\S+)/i              // /handoff {channelId}
@@ -128,6 +129,7 @@ export class Gateway {
           '`/pending [channelId]` — list pending pairing requests',
           '`/copilot-login` — connect GitHub Copilot (free claude-sonnet-4.6)',
           '`/copilot-status` — check Copilot auth status',
+          '`/model [name]` — show or switch AI model',
           '`/claude-key <sk-ant-...>` — set Anthropic API key (owner only, DM only)',
           '`/claude-status` — check Anthropic API key status',
           '`/vision-usage` — check vision budget usage',
@@ -248,6 +250,48 @@ export class Gateway {
           await channel.send({ threadId: message.threadId, text: '⚠️ Copilot configured but token refresh failed.' })
         }
       }
+      return
+    }
+
+    const modelMatch = CMD_MODEL.exec(text)
+    if (modelMatch) {
+      const CLAUDE_MODELS = [
+        'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-5',
+        'claude-haiku-4-5', 'claude-opus-4-5',
+      ]
+      const COPILOT_MODELS = ['claude-sonnet-4.6', 'gpt-4o', 'gpt-4.1', 'gpt-4.1-mini', 'o3-mini']
+
+      if (!modelMatch[1]) {
+        // Show current + available
+        const current = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-5'
+        const usingCopilot = isCopilotConfigured() && !process.env.ANTHROPIC_API_KEY
+        const list = (usingCopilot ? COPILOT_MODELS : CLAUDE_MODELS)
+          .map((m) => (m === current ? `• \`${m}\` ← current` : `• \`${m}\``))
+          .join('\n')
+        await channel.send({ threadId: message.threadId, text: `**Current model:** \`${current}\`\n\n**Available:**\n${list}\n\nSwitch with \`/model <name>\`` })
+        return
+      }
+
+      const requested = modelMatch[1].toLowerCase()
+      const allModels = [...CLAUDE_MODELS, ...COPILOT_MODELS]
+      const match = allModels.find((m) => m.toLowerCase() === requested || m.toLowerCase().includes(requested))
+      if (!match) {
+        await channel.send({ threadId: message.threadId, text: `❌ Unknown model \`${requested}\`\nRun \`/model\` to see available models.` })
+        return
+      }
+
+      process.env.HYDRA_CLAUDE_MODEL = match
+      // Persist to credentials file so it survives restarts
+      const fs2 = await import('node:fs')
+      const path2 = await import('node:path')
+      const os2 = await import('node:os')
+      const prefPath = path2.join(os2.homedir(), '.hydra', 'preferences.json')
+      let prefs: Record<string, string> = {}
+      try { prefs = JSON.parse(fs2.readFileSync(prefPath, 'utf8')) } catch {}
+      prefs.HYDRA_CLAUDE_MODEL = match
+      fs2.mkdirSync(path2.dirname(prefPath), { recursive: true })
+      fs2.writeFileSync(prefPath, JSON.stringify(prefs, null, 2))
+      await channel.send({ threadId: message.threadId, text: `✅ Switched to \`${match}\`\nAll new messages will use this model.` })
       return
     }
 
