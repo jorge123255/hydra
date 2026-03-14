@@ -151,3 +151,54 @@ export function buildMemoryPrompt(channelId: string, threadId: string, includeTo
 
   return parts.join('\n') + '\n\n'
 }
+
+// ── Long-term memory compression ──────────────────────────────────────────────
+// When a memory file grows beyond COMPRESS_THRESHOLD lines, summarize older
+// entries via AI and replace them with a compact summary, keeping the most
+// recent KEEP_RECENT entries verbatim.
+
+const COMPRESS_THRESHOLD = 80  // lines before triggering compression
+const KEEP_RECENT = 20         // recent lines to keep verbatim
+
+/** Compress memory if it has grown too large. Pass callAI to summarize old entries. */
+export async function compressMemoryIfNeeded(
+  channelId: string,
+  threadId: string,
+  callAI?: (prompt: string) => Promise<string>
+): Promise<void> {
+  const existing = readMemory(channelId, threadId)
+  if (!existing) return
+
+  const lines = existing.split('\n').filter((l) => l.trim())
+  if (lines.length < COMPRESS_THRESHOLD) return
+
+  log.info(`Compressing memory for ${channelId}:${threadId} (${lines.length} lines)`)
+
+  const older = lines.slice(0, lines.length - KEEP_RECENT)
+  const recent = lines.slice(lines.length - KEEP_RECENT)
+
+  let summary = '(prior history compressed)'
+  if (callAI) {
+    try {
+      summary = await callAI(
+        `Summarize these memory entries into a compact bullet-point list (max 10 bullets). ` +
+        `Preserve all factual details about the user and important context. Be concise.\n\n` +
+        older.join('\n')
+      )
+    } catch (e) {
+      log.warn(`Memory compression AI call failed: ${e}`)
+    }
+  }
+
+  const archivePath = memoryPath(channelId, threadId).replace('.md', `-archive-${Date.now()}.md`)
+  try {
+    fs.writeFileSync(archivePath, older.join('\n'))
+  } catch {}
+
+  const compressed =
+    `# Memory\n\n## Summary of prior history\n${summary}\n\n## Recent\n` +
+    recent.join('\n')
+
+  writeMemory(channelId, threadId, compressed)
+  log.info(`Memory compressed: ${older.length} lines → summary + ${recent.length} recent`)
+}

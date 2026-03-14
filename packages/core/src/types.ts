@@ -13,6 +13,9 @@ export type InboundMessage = {
   attachments?: Attachment[];
   // base64 data URLs for images (e.g. "data:image/jpeg;base64,...")
   images?: string[];
+  // raw base64 audio for voice messages (transcribed by gateway)
+  voiceBase64?: string;
+  voiceMimeType?: string;
   replyToId?: string;
   timestamp: Date;
   raw?: unknown;

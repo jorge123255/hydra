@@ -35,7 +35,7 @@ export class TelegramChannel extends BaseChannel {
     this.bot.on("message", async (ctx) => {
       if (!this.isAllowed(ctx.from?.id, ctx.from?.username)) return;
       const text = ctx.message.text ?? ctx.message.caption ?? "";
-      if (!text && !ctx.message.photo && !ctx.message.document && !ctx.message.audio) return;
+      if (!text && !ctx.message.photo && !ctx.message.document && !ctx.message.audio && !ctx.message.voice) return;
 
       // Download images for vision support
       const images: string[] = [];
@@ -44,6 +44,14 @@ export class TelegramChannel extends BaseChannel {
         const b64 = await this.downloadFileAsBase64(largest.file_id, "image/jpeg");
         if (b64) images.push(`data:image/jpeg;base64,${b64}`);
       }
+      // Voice message — download as base64 for gateway transcription
+      let voiceBase64: string | undefined
+      let voiceMimeType: string | undefined
+      if (ctx.message.voice) {
+        const b64 = await this.downloadFileAsBase64(ctx.message.voice.file_id, "audio/ogg");
+        if (b64) { voiceBase64 = b64; voiceMimeType = "audio/ogg"; }
+      }
+
       if (ctx.message.document?.mime_type?.startsWith("image/")) {
         const b64 = await this.downloadFileAsBase64(
           ctx.message.document.file_id,
@@ -63,6 +71,8 @@ export class TelegramChannel extends BaseChannel {
         senderName: ctx.from?.username ?? ctx.from?.first_name,
         text,
         images: images.length ? images : undefined,
+        voiceBase64,
+        voiceMimeType,
         replyToId: ctx.message.reply_to_message
           ? String(ctx.message.reply_to_message.message_id)
           : undefined,

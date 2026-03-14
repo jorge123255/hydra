@@ -19,6 +19,9 @@ import { buildSystemPrompt, NO_REPLY, HEARTBEAT_OK } from './system-prompt.js'
 import { ensureWorkspaceFiles, readWorkspaceFiles } from './workspace.js'
 import { HeartbeatManager, HEARTBEAT_PROMPT } from './heartbeat.js'
 import { parseSaveTags, applySaveTag, detectAutoUpdates } from './self-update.js'
+import { transcribeAudio, isTranscriptionConfigured } from './transcribe.js'
+import { extractUrls, buildWebContext } from './webfetch.js'
+import { compressMemoryIfNeeded } from './memory.js'
 
 const log = createLogger('gateway')
 
@@ -517,6 +520,28 @@ export class Gateway {
       applySaveTag(tag, session.workdir, message.channelId, message.threadId)
     }
 
+    // Voice message transcription
+    if (message.voiceBase64 && !message.text) {
+      await message.setReaction?.('👀').catch(() => {})
+      if (!isTranscriptionConfigured()) {
+        await channel.send({ threadId: message.threadId, text: '🎤 Voice received but transcription not configured. Set GROQ_API_KEY for free transcription.' })
+        return
+      }
+      const transcript = await transcribeAudio(message.voiceBase64, message.voiceMimeType ?? 'audio/ogg')
+      if (!transcript) {
+        await channel.send({ threadId: message.threadId, text: '🎤 Could not transcribe voice message.' })
+        return
+      }
+      log.info(`[${key}] Voice transcribed: "${transcript.slice(0, 80)}"`)
+      ;(message as any).text = `🎤 ${transcript}`
+    }
+
+    // Compress memory if it's grown large (async, non-blocking)
+    compressMemoryIfNeeded(message.channelId, message.threadId, async (p) => {
+      const { callDirect } = await import('./copilot-chat.js')
+      return callDirect(p)
+    }).catch(() => {})
+
     const existing = this.activeRuns.get(key)
     if (existing) { existing.abort() }
     const ctrl = new AbortController()
@@ -550,7 +575,12 @@ export class Gateway {
     })
 
     const contextPrefix = goesToOpenCode ? buildMemoryPrompt(message.channelId, message.threadId, true) : ''
-    const fullPrompt = `${envelope}\n${contextPrefix}${prompt}`
+
+    // Fetch web content for any URLs in the message (non-blocking with 15s timeout)
+    const urls = extractUrls(prompt)
+    const webContext = urls.length ? await buildWebContext(urls) : ''
+
+    const fullPrompt = `${envelope}\n${contextPrefix}${webContext}${prompt}`
 
     log.info(`[${key}] intent=${intent} route=${goesToOpenCode ? 'opencode' : 'direct'} "${prompt.slice(0, 100)}"`)
     await message.setReaction?.('🤔').catch(() => {})
