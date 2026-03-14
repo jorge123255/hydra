@@ -10,8 +10,8 @@ An AI coding + assistant bot that combines the stability of [Kimaki](https://git
 
 - **Multi-channel** — Telegram, Discord, Slack from one codebase
 - **AI coding sessions** — powered by [OpenCode](https://opencode.ai) (free, runs locally)
-- **Free claude-sonnet-4.6** — via GitHub Copilot OAuth (vision-capable)
-- **Smart routing** — code questions → OpenCode, quick chat → Copilot, images → vision model, desktop tasks → computer-use
+- **GitHub Copilot** — claude-sonnet-4.6 via Copilot subscription (vision-capable)
+- **Smart routing** — code → OpenCode, quick chat → Claude API/Copilot, images → vision, desktop → computer-use
 - **Full Mac desktop control** — AppleScript + cliclick + screenshot vision (tiered, token-efficient)
 - **Streaming replies** — live message editing as the AI types
 - **Security** — pairing codes for unknown senders, owner-only commands
@@ -90,7 +90,7 @@ HYDRA_OWNER_IDS=123456789          # Telegram user ID
 # Working directory for OpenCode sessions
 HYDRA_WORKDIR=/Users/yourname/projects
 
-# GitHub Copilot (optional — enables free claude-sonnet-4.6 with vision)
+# GitHub Copilot (optional — requires active Copilot subscription)
 HYDRA_USE_COPILOT=true
 HYDRA_COPILOT_MODEL=claude-sonnet-4.6
 HYDRA_VISION_BUDGET=50             # max vision calls per day
@@ -176,7 +176,7 @@ HYDRA_OWNER_IDS=your_telegram_user_id
 
 ---
 
-## GitHub Copilot Setup (free claude-sonnet-4.6)
+## GitHub Copilot Setup (requires Copilot subscription)
 
 1. Make sure you have an active GitHub Copilot subscription
 2. Message the bot: `/copilot-login`

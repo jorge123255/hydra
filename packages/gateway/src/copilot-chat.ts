@@ -9,7 +9,10 @@ export {
   DEFAULT_COPILOT_BASE_URL,
 } from './auth/github-copilot.js'
 
+export { isClaudeOAuthAvailable, getValidClaudeToken } from './auth/claude-keychain.js'
+
 import { resolveCopilotCredentials } from './auth/github-copilot.js'
+import { getValidClaudeToken } from './auth/claude-keychain.js'
 import { getVisionUsage } from '@hydra/computer-use'
 
 /** Current vision budget status for today */
@@ -17,15 +20,20 @@ export function getVisionUsageStatus(): { count: number; budget: number; remaini
   return getVisionUsage()
 }
 
-/** True if ANTHROPIC_API_KEY is set */
+/** True if ANTHROPIC_API_KEY is set OR Claude OAuth token is available */
 export function isClaudeConfigured(): boolean {
-  return !!process.env.ANTHROPIC_API_KEY
+  if (process.env.ANTHROPIC_API_KEY) return true
+  return getValidClaudeToken() !== null
 }
 
 /** Call Claude via Anthropic API (supports vision via base64 images) */
 export async function callClaudeDirect(prompt: string, images?: string[]): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set')
+  const oauthToken = apiKey ? null : getValidClaudeToken()
+
+  if (!apiKey && !oauthToken) {
+    throw new Error('No Claude credentials — set ANTHROPIC_API_KEY or ensure Claude Code is logged in')
+  }
 
   const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-5'
 
@@ -47,12 +55,16 @@ export async function callClaudeDirect(prompt: string, images?: string[]): Promi
   }
   content.push({ type: 'text', text: prompt })
 
+  const authHeaders: Record<string, string> = apiKey
+    ? { 'x-api-key': apiKey }
+    : { Authorization: `Bearer ${oauthToken}` }
+
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
+      ...authHeaders,
     },
     body: JSON.stringify({
       model,

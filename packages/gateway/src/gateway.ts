@@ -17,7 +17,7 @@ import { buildMemoryPrompt, appendMemory, writeMemory } from './memory.js'
 import { createLogger } from './logger.js'
 import { isAllowed, upsertPairingRequest, approvePairing, revokePairing, listPendingRequests } from './pairing.js'
 import { classifyIntent, stripIntentPrefix } from './router.js'
-import { isCopilotConfigured, isClaudeConfigured, githubCopilotLogin, resolveCopilotCredentials, getVisionUsageStatus, callDirect } from './copilot-chat.js'
+import { isCopilotConfigured, isClaudeConfigured, isClaudeOAuthAvailable, getValidClaudeToken, githubCopilotLogin, resolveCopilotCredentials, getVisionUsageStatus, callDirect } from './copilot-chat.js'
 import { createFromPR, getWorktreeDiff, rollbackWorktree } from './worktree-manager.js'
 
 const log = createLogger('gateway')
@@ -275,11 +275,18 @@ export class Gateway {
     }
 
     if (CMD_CLAUDE_STATUS.test(text)) {
-      if (isClaudeConfigured()) {
-        const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-5'
-        await channel.send({ threadId: message.threadId, text: `✅ Claude API active\nModel: \`${model}\`\nKey: \`...${(process.env.ANTHROPIC_API_KEY ?? '').slice(-6)}\`` })
+      const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-5'
+      if (process.env.ANTHROPIC_API_KEY) {
+        await channel.send({ threadId: message.threadId, text: `✅ Claude active (API key)\nModel: \`${model}\`\nKey: \`...${process.env.ANTHROPIC_API_KEY.slice(-6)}\`` })
       } else {
-        await channel.send({ threadId: message.threadId, text: '❌ ANTHROPIC_API_KEY not set in .env' })
+        const oauthToken = getValidClaudeToken()
+        if (oauthToken) {
+          await channel.send({ threadId: message.threadId, text: `✅ Claude active (Claude Code OAuth)\nModel: \`${model}\`\nToken: \`...${oauthToken.slice(-8)}\`` })
+        } else if (isClaudeOAuthAvailable()) {
+          await channel.send({ threadId: message.threadId, text: `⚠️ Claude OAuth token found but expired\nOpen Claude Code once to refresh it, then retry.` })
+        } else {
+          await channel.send({ threadId: message.threadId, text: '❌ No Claude credentials\nOptions:\n• Run \`/claude-key sk-ant-...\` to set API key\n• Or log into Claude Code on bob — token is shared automatically' })
+        }
       }
       return
     }
