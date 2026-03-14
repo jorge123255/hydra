@@ -108,7 +108,6 @@ export class TelegramChannel extends BaseChannel {
     let lastId = "";
     for (const chunk of chunks) {
       const sent = await this.bot.api.sendMessage(chatId, chunk, {
-        parse_mode: "Markdown",
         reply_parameters: message.replyToId
           ? { message_id: Number(message.replyToId) }
           : undefined,
@@ -126,9 +125,8 @@ export class TelegramChannel extends BaseChannel {
     const truncated = text.length > TELEGRAM_MAX_MESSAGE_LENGTH
       ? text.slice(0, TELEGRAM_MAX_MESSAGE_LENGTH - 3) + "..."
       : text;
-    await this.bot.api.editMessageText(chatId, msgId, truncated, {
-      parse_mode: "Markdown",
-    }).catch(() => {}); // ignore "message not modified" errors
+    await this.bot.api.editMessageText(chatId, msgId, truncated)
+      .catch(() => {}); // ignore "message not modified" errors
   }
 
   async sendTyping(threadId: string): Promise<void> {
