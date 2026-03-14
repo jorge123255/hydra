@@ -48,7 +48,7 @@ cat > "$PLIST_PATH" << PLIST
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key><string>${HOME}</string>
-    <key>PATH</key><string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    <key>PATH</key><string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
 $(printf "$ENV_ENTRIES")  </dict>
 
   <key>RunAtLoad</key>
