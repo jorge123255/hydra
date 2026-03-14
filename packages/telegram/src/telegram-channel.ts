@@ -1,31 +1,23 @@
-// Telegram channel adapter for Hydra.
-// Uses grammy (same as OpenClaw's src/telegram/) with OpenClaw's proven patterns:
-// - apiThrottler to avoid Telegram rate limits
-// - sequentialize to prevent concurrent message handling per chat
-// - Auto-select IPv4/IPv6 family (WSL2 fix from OpenClaw)
-
 import { Bot } from "grammy";
 import { apiThrottler } from "@grammyjs/transformer-throttler";
 import { sequentialize } from "@grammyjs/runner";
 import { BaseChannel } from "@hydra/core";
 import type { InboundMessage, OutboundMessage } from "@hydra/core";
+import https from "node:https";
 
 export type TelegramChannelConfig = {
   token: string;
-  // Restrict to specific user IDs or usernames (from OpenClaw's allowFrom)
   allowFrom?: Array<string | number>;
-  // Max file size in MB
   mediaMaxMb?: number;
-  // Webhook URL (if not set, uses long polling)
   webhookUrl?: string;
 };
 
 const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
+const MEDIA_MAX_BYTES = 20 * 1024 * 1024; // 20 MB
 
 export class TelegramChannel extends BaseChannel {
   readonly id = "telegram" as const;
   readonly name = "Telegram";
-
   private bot: Bot;
   private config: TelegramChannelConfig;
 
@@ -33,24 +25,32 @@ export class TelegramChannel extends BaseChannel {
     super();
     this.config = config;
     this.bot = new Bot(config.token);
-
-    // Apply OpenClaw's proven middleware stack
     this.bot.api.config.use(apiThrottler());
     this.setupHandlers();
   }
 
   private setupHandlers(): void {
-    // Sequentialize per chat_id — prevents concurrent handling of messages
-    // from the same chat, mirroring OpenClaw's sequential-key approach
-    this.bot.use(
-      sequentialize((ctx) => String(ctx.chat?.id ?? ctx.from?.id ?? "unknown"))
-    );
+    this.bot.use(sequentialize((ctx) => String(ctx.chat?.id ?? ctx.from?.id ?? "unknown")));
 
     this.bot.on("message", async (ctx) => {
       if (!this.isAllowed(ctx.from?.id, ctx.from?.username)) return;
-
       const text = ctx.message.text ?? ctx.message.caption ?? "";
       if (!text && !ctx.message.photo && !ctx.message.document && !ctx.message.audio) return;
+
+      // Download images for vision support
+      const images: string[] = [];
+      if (ctx.message.photo?.length) {
+        const largest = ctx.message.photo[ctx.message.photo.length - 1];
+        const b64 = await this.downloadFileAsBase64(largest.file_id, "image/jpeg");
+        if (b64) images.push(`data:image/jpeg;base64,${b64}`);
+      }
+      if (ctx.message.document?.mime_type?.startsWith("image/")) {
+        const b64 = await this.downloadFileAsBase64(
+          ctx.message.document.file_id,
+          ctx.message.document.mime_type
+        );
+        if (b64) images.push(`data:${ctx.message.document.mime_type};base64,${b64}`);
+      }
 
       const inbound: InboundMessage = {
         id: String(ctx.message.message_id),
@@ -59,6 +59,7 @@ export class TelegramChannel extends BaseChannel {
         senderId: String(ctx.from?.id ?? "unknown"),
         senderName: ctx.from?.username ?? ctx.from?.first_name,
         text,
+        images: images.length ? images : undefined,
         replyToId: ctx.message.reply_to_message
           ? String(ctx.message.reply_to_message.message_id)
           : undefined,
@@ -66,7 +67,6 @@ export class TelegramChannel extends BaseChannel {
         raw: ctx.message,
         attachments: this.extractAttachments(ctx.message),
       };
-
       await this.emitMessage(inbound);
     });
 
@@ -83,11 +83,8 @@ export class TelegramChannel extends BaseChannel {
     if (this.config.webhookUrl) {
       await this.bot.api.setWebhook(this.config.webhookUrl);
     } else {
-      // Long polling — delete any existing webhook first
       await this.bot.api.deleteWebhook();
-      this.bot.start({
-        onStart: () => this.emitEvent({ type: "connected", channelId: this.id }),
-      });
+      this.bot.start({ onStart: () => this.emitEvent({ type: "connected", channelId: this.id }) });
     }
   }
 
@@ -97,17 +94,41 @@ export class TelegramChannel extends BaseChannel {
   }
 
   async send(message: OutboundMessage): Promise<void> {
-    const chatId = Number(message.threadId);
-    const chunks = this.splitMessage(message.text);
+    await this.sendAndGetId(message);
+  }
 
+  async sendAndGetId(message: OutboundMessage): Promise<string> {
+    const chatId = Number(message.threadId);
+    // If editMessageId is set, edit in place
+    if (message.editMessageId) {
+      await this.editMessage(message.threadId, message.editMessageId, message.text);
+      return message.editMessageId;
+    }
+    const chunks = this.splitMessage(message.text);
+    let lastId = "";
     for (const chunk of chunks) {
-      await this.bot.api.sendMessage(chatId, chunk, {
+      const sent = await this.bot.api.sendMessage(chatId, chunk, {
         parse_mode: "Markdown",
         reply_parameters: message.replyToId
           ? { message_id: Number(message.replyToId) }
           : undefined,
       });
+      lastId = String(sent.message_id);
     }
+    return lastId;
+  }
+
+  async editMessage(threadId: string, messageId: string, text: string): Promise<void> {
+    const chatId = Number(threadId);
+    const msgId = Number(messageId);
+    if (!chatId || !msgId) return;
+    // Telegram edit has same 4096 char limit — truncate if needed
+    const truncated = text.length > TELEGRAM_MAX_MESSAGE_LENGTH
+      ? text.slice(0, TELEGRAM_MAX_MESSAGE_LENGTH - 3) + "..."
+      : text;
+    await this.bot.api.editMessageText(chatId, msgId, truncated, {
+      parse_mode: "Markdown",
+    }).catch(() => {}); // ignore "message not modified" errors
   }
 
   async sendTyping(threadId: string): Promise<void> {
@@ -124,28 +145,41 @@ export class TelegramChannel extends BaseChannel {
     );
   }
 
+  private async downloadFileAsBase64(fileId: string, mime: string): Promise<string | null> {
+    try {
+      const file = await this.bot.api.getFile(fileId);
+      if (!file.file_path) return null;
+      const url = `https://api.telegram.org/file/bot${this.config.token}/${file.file_path}`;
+      return await new Promise<string | null>((resolve) => {
+        https.get(url, (res) => {
+          const chunks: Buffer[] = [];
+          let size = 0;
+          res.on("data", (chunk: Buffer) => {
+            size += chunk.length;
+            if (size > MEDIA_MAX_BYTES) { resolve(null); res.destroy(); return; }
+            chunks.push(chunk);
+          });
+          res.on("end", () => resolve(Buffer.concat(chunks).toString("base64")));
+          res.on("error", () => resolve(null));
+        }).on("error", () => resolve(null));
+      });
+    } catch {
+      return null;
+    }
+  }
+
   private extractAttachments(message: any): InboundMessage["attachments"] {
     const attachments: NonNullable<InboundMessage["attachments"]> = [];
-
     if (message.photo?.length) {
       const largest = message.photo[message.photo.length - 1];
       attachments.push({ type: "image", url: largest.file_id, mimeType: "image/jpeg" });
     }
     if (message.document) {
-      attachments.push({
-        type: "file",
-        url: message.document.file_id,
-        mimeType: message.document.mime_type,
-        name: message.document.file_name,
-      });
+      attachments.push({ type: "file", url: message.document.file_id,
+        mimeType: message.document.mime_type, name: message.document.file_name });
     }
-    if (message.audio) {
-      attachments.push({ type: "audio", url: message.audio.file_id, mimeType: "audio/mpeg" });
-    }
-    if (message.voice) {
-      attachments.push({ type: "audio", url: message.voice.file_id, mimeType: "audio/ogg" });
-    }
-
+    if (message.audio) attachments.push({ type: "audio", url: message.audio.file_id, mimeType: "audio/mpeg" });
+    if (message.voice) attachments.push({ type: "audio", url: message.voice.file_id, mimeType: "audio/ogg" });
     return attachments;
   }
 
@@ -154,7 +188,6 @@ export class TelegramChannel extends BaseChannel {
     const chunks: string[] = [];
     let remaining = text;
     while (remaining.length > 0) {
-      // Try to split on newline to avoid breaking mid-sentence
       let cutAt = limit;
       const newline = remaining.lastIndexOf("\n", limit);
       if (newline > limit * 0.5) cutAt = newline + 1;

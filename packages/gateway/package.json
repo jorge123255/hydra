@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@hydra/core": "workspace:^",
+    "@hydra/computer-use": "workspace:^",
     "@hydra/discord": "workspace:^",
     "@hydra/telegram": "workspace:^",
     "@hydra/slack": "workspace:^",
