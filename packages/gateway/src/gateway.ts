@@ -255,20 +255,32 @@ export class Gateway {
 
     const modelMatch = CMD_MODEL.exec(text)
     if (modelMatch) {
+      // Anthropic API models (used when ANTHROPIC_API_KEY or Claude Code OAuth)
       const CLAUDE_MODELS = [
-        'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-5',
-        'claude-haiku-4-5', 'claude-opus-4-5',
+        'claude-opus-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5',
       ]
+      // GitHub Copilot models (used when /copilot-login configured)
       const COPILOT_MODELS = ['claude-sonnet-4.6', 'gpt-4o', 'gpt-4.1', 'gpt-4.1-mini', 'o3-mini']
+
+      const usingCopilot = isCopilotConfigured() && !process.env.ANTHROPIC_API_KEY && !isClaudeConfigured()
 
       if (!modelMatch[1]) {
         // Show current + available
-        const current = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-5'
-        const usingCopilot = isCopilotConfigured() && !process.env.ANTHROPIC_API_KEY
-        const list = (usingCopilot ? COPILOT_MODELS : CLAUDE_MODELS)
-          .map((m) => (m === current ? `• \`${m}\` ← current` : `• \`${m}\``))
-          .join('\n')
-        await channel.send({ threadId: message.threadId, text: `**Current model:** \`${current}\`\n\n**Available:**\n${list}\n\nSwitch with \`/model <name>\`` })
+        const current = process.env.HYDRA_CLAUDE_MODEL ?? (usingCopilot ? 'claude-sonnet-4.6' : 'claude-sonnet-4-5')
+        const anthropicList = CLAUDE_MODELS.map((m) => (m === current ? `• \`${m}\` ← current` : `• \`${m}\``)).join('\n')
+        const copilotList = COPILOT_MODELS.map((m) => (m === current ? `• \`${m}\` ← current` : `• \`${m}\``)).join('\n')
+        const text = [
+          `**Current model:** \`${current}\``,
+          '',
+          '**Anthropic API / Claude Code OAuth:**',
+          anthropicList,
+          '',
+          '**GitHub Copilot** _(requires /copilot-login)_:',
+          copilotList,
+          '',
+          'Switch with \`/model <name>\`',
+        ].join('\n')
+        await channel.send({ threadId: message.threadId, text })
         return
       }
 
