@@ -6,6 +6,7 @@ import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
 import net from 'node:net'
 import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk/v2'
 import { createLogger } from './logger.js'
+import { getValidClaudeToken } from './auth/claude-keychain.js'
 
 const log = createLogger('opencode-server')
 
@@ -65,9 +66,20 @@ async function startSingleServer(): Promise<SingleServer> {
 
   log.info(`Starting opencode server on port ${port} (${cmd})`)
 
+  // Ensure OpenCode has an API key — use ANTHROPIC_API_KEY if set,
+  // otherwise inject the Claude Code OAuth token so OpenCode can authenticate.
+  const spawnEnv: Record<string, string> = { ...process.env as Record<string, string> }
+  if (!spawnEnv.ANTHROPIC_API_KEY) {
+    const oauthToken = getValidClaudeToken()
+    if (oauthToken) {
+      spawnEnv.ANTHROPIC_API_KEY = oauthToken
+      log.info('Injecting Claude Code OAuth token into OpenCode environment')
+    }
+  }
+
   const proc = spawn(cmd, ['serve', '--port', String(port)], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env },
+    env: spawnEnv,
   })
 
   proc.stderr?.on('data', (chunk: Buffer) => {
