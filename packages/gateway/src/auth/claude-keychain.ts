@@ -15,6 +15,8 @@ const log = createLogger('claude-auth')
 
 const KEYCHAIN_SERVICE = 'Claude Code-credentials'
 const CREDENTIALS_FILE = path.join(os.homedir(), '.claude', '.credentials.json')
+// Written by scripts/sync-claude-auth.sh (readable by daemon without keychain access)
+const SYNCED_FILE = path.join(os.homedir(), '.hydra', 'credentials', 'claude-code-oauth.json')
 
 export type ClaudeOAuthCreds = {
   accessToken: string
@@ -56,6 +58,17 @@ function readFromKeychain(): ClaudeOAuthCreds | null {
   }
 }
 
+/** Read from ~/.hydra/credentials/claude-code-oauth.json (written by sync-claude-auth.sh) */
+function readFromSyncedFile(): ClaudeOAuthCreds | null {
+  try {
+    if (!fs.existsSync(SYNCED_FILE)) return null
+    const raw = JSON.parse(fs.readFileSync(SYNCED_FILE, 'utf8'))
+    return parseCredentialJson(raw)
+  } catch {
+    return null
+  }
+}
+
 /** Read from ~/.claude/.credentials.json (fallback if keychain unavailable) */
 function readFromFile(): ClaudeOAuthCreds | null {
   try {
@@ -77,7 +90,7 @@ export function readClaudeOAuthCreds(forceRefresh = false): ClaudeOAuthCreds | n
     return _cached.creds
   }
 
-  const creds = readFromKeychain() ?? readFromFile()
+  const creds = readFromSyncedFile() ?? readFromKeychain() ?? readFromFile()
   if (creds) {
     _cached = { creds, readAt: now }
     log.debug(`Claude OAuth creds loaded (expires ${new Date(creds.expiresAt).toISOString()})`)
