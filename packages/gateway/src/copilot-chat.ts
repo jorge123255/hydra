@@ -59,23 +59,32 @@ export async function callClaudeDirect(prompt: string, images?: string[]): Promi
     ? { 'x-api-key': apiKey }
     : { Authorization: `Bearer ${oauthToken}` }
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'anthropic-version': '2023-06-01',
-      ...authHeaders,
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 4096,
-      messages: [{ role: 'user', content }],
-    }),
-  })
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 60_000) // 60s timeout
+
+  let res: Response
+  try {
+    res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-version': '2023-06-01',
+        ...authHeaders,
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 4096,
+        messages: [{ role: 'user', content }],
+      }),
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
 
   if (!res.ok) {
     const body = await res.text().catch(() => '')
-    throw new Error(`Anthropic API error ${res.status}: ${body.slice(0, 200)}`)
+    throw new Error(`Anthropic API error ${res.status}: ${body.slice(0, 300)}`)
   }
 
   const json = (await res.json()) as any

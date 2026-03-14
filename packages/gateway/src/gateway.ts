@@ -510,6 +510,7 @@ export class Gateway {
         channel.send({ threadId: message.threadId, text })
       })
     } catch (e) {
+      log.error(`[runCopilotChat] ${e}`)
       await channel.editMessage(message.threadId, placeholderId, `❌ ${e}`).catch(() => {})
     }
   }
