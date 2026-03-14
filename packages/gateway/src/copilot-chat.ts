@@ -20,20 +20,18 @@ export function getVisionUsageStatus(): { count: number; budget: number; remaini
   return getVisionUsage()
 }
 
-/** True if ANTHROPIC_API_KEY is set OR Claude OAuth token is available */
+/** True if ANTHROPIC_API_KEY is set (OAuth token alone cannot call the API directly) */
 export function isClaudeConfigured(): boolean {
-  if (process.env.ANTHROPIC_API_KEY) return true
-  return getValidClaudeToken() !== null
+  return !!process.env.ANTHROPIC_API_KEY
 }
 
 /** Call Claude via Anthropic API (supports vision via base64 images) */
 export async function callClaudeDirect(prompt: string, images?: string[]): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY
-  const oauthToken = apiKey ? null : getValidClaudeToken()
-
-  if (!apiKey && !oauthToken) {
-    throw new Error('No Claude credentials — set ANTHROPIC_API_KEY or ensure Claude Code is logged in')
+  if (!apiKey) {
+    throw new Error('ANTHROPIC_API_KEY not set — send /claude-key sk-ant-... to configure')
   }
+  const oauthToken = null
 
   const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'
 
@@ -55,9 +53,7 @@ export async function callClaudeDirect(prompt: string, images?: string[]): Promi
   }
   content.push({ type: 'text', text: prompt })
 
-  const authHeaders: Record<string, string> = apiKey
-    ? { 'x-api-key': apiKey }
-    : { Authorization: `Bearer ${oauthToken}` }
+  const authHeaders: Record<string, string> = { 'x-api-key': apiKey }
 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 60_000) // 60s timeout
