@@ -25,13 +25,21 @@ export function isClaudeConfigured(): boolean {
   return !!process.env.ANTHROPIC_API_KEY
 }
 
+const SYSTEM_PROMPT = `You are a personal AI assistant running inside Hydra, a multi-channel bot.
+
+Reply style:
+- Be direct and concise. Lead with the answer, not the reasoning.
+- Use plain text. No markdown headers or bullet spam unless it genuinely helps.
+- Match the user's register — casual question gets a casual answer.
+- For code or technical output, use code blocks.
+- Never start with "Certainly!", "Of course!", "Great question!" or similar filler.`
+
 /** Call Claude via Anthropic API (supports vision via base64 images) */
 export async function callClaudeDirect(prompt: string, images?: string[]): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) {
     throw new Error('ANTHROPIC_API_KEY not set — send /claude-key sk-ant-... to configure')
   }
-  const oauthToken = null
 
   const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'
 
@@ -53,10 +61,8 @@ export async function callClaudeDirect(prompt: string, images?: string[]): Promi
   }
   content.push({ type: 'text', text: prompt })
 
-  const authHeaders: Record<string, string> = { 'x-api-key': apiKey }
-
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 60_000) // 60s timeout
+  const timeout = setTimeout(() => controller.abort(), 60_000)
 
   let res: Response
   try {
@@ -65,11 +71,12 @@ export async function callClaudeDirect(prompt: string, images?: string[]): Promi
       headers: {
         'Content-Type': 'application/json',
         'anthropic-version': '2023-06-01',
-        ...authHeaders,
+        'x-api-key': apiKey,
       },
       body: JSON.stringify({
         model,
         max_tokens: 4096,
+        system: SYSTEM_PROMPT,
         messages: [{ role: 'user', content }],
       }),
       signal: controller.signal,
@@ -114,7 +121,14 @@ export async function callCopilotDirect(prompt: string, images?: string[]): Prom
       'Copilot-Integration-Id': 'hydra-gateway',
       'Editor-Version': 'hydra/1.0',
     },
-    body: JSON.stringify({ model, max_tokens: 4096, messages: [{ role: 'user', content }] }),
+    body: JSON.stringify({
+      model,
+      max_tokens: 4096,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content },
+      ],
+    }),
   })
 
   if (!res.ok) {
