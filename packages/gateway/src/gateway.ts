@@ -8,6 +8,9 @@
 // Phase 9: cross-channel session continuity (/link, /handoff)
 // Phase 10: GitHub PR worktrees (/diff, /rollback, auto PR#N detection)
 
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
 import { ChannelRegistry, type InboundMessage, type ChannelEvent } from '@hydra/core'
 import { SessionManager } from './session-manager.js'
 import { runSession } from './opencode-session.js'
@@ -18,10 +21,25 @@ import { createLogger } from './logger.js'
 import { isAllowed, upsertPairingRequest, approvePairing, revokePairing, listPendingRequests } from './pairing.js'
 import { classifyIntent, stripIntentPrefix } from './router.js'
 import { isCopilotConfigured, isClaudeConfigured, getValidClaudeToken, githubCopilotLogin, resolveCopilotCredentials, getVisionUsageStatus } from './copilot-chat.js'
-import { buildAuthUrl, exchangeCodeForKey, saveApiKey, type PendingOAuth } from './auth/anthropic-oauth.js'
+import { buildAuthUrl, exchangeCode, saveResult, saveApiKey, type PendingOAuth } from './auth/anthropic-oauth.js'
 import { createFromPR, getWorktreeDiff, rollbackWorktree } from './worktree-manager.js'
 
 const log = createLogger('gateway')
+
+/** True if opencode auth.json has any anthropic credentials (API key or OAuth tokens) */
+function hasOpencodeAuth(): boolean {
+  try {
+    const data = JSON.parse(fs.readFileSync(
+      path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json'), 'utf8'
+    ))
+    return !!data?.anthropic
+  } catch { return false }
+}
+
+/** True if any AI credentials are available */
+function hasAnyCredentials(): boolean {
+  return isClaudeConfigured() || isCopilotConfigured() || hasOpencodeAuth()
+}
 
 export type GatewayConfig = {
   workdir: string
@@ -53,11 +71,11 @@ const CMD_LOGIN      = /^\/opencode-login$/i
 const CMD_CODE       = /^\/opencode-code\s+(\S+)/i
 
 const NO_CREDS_MSG = [
-  '🔑 **No AI credentials configured.**',
+  '🔑 No AI credentials configured.',
   '',
   'To get started:',
-  '• Run `/opencode-login` to connect your Claude account (recommended)',
-  '• Or run `/claude-key sk-ant-...` to paste an API key directly',
+  '• Run /opencode-login to connect your Claude account (recommended)',
+  '• Or run /claude-key sk-ant-... to paste an API key directly',
 ].join('\n')
 
 export class Gateway {
@@ -117,7 +135,7 @@ export class Gateway {
         if (isNew) {
           await channel.send({
             threadId: message.threadId,
-            text: `👋 Hi! I don't recognize you.\n\nTo get access, share this code with the bot owner:\n\`\`\`\n${code}\n\`\`\`\nTell them to run:\n\`/approve ${message.channelId} ${code}\`\n\nYour ID: \`${message.senderId}\``,
+            text: `Hi! I don't recognize you.\n\nTo get access, share this code with the bot owner:\n${code}\n\nTell them to run:\n/approve ${message.channelId} ${code}\n\nYour ID: ${message.senderId}`,
           })
         }
         return
@@ -129,30 +147,30 @@ export class Gateway {
       await channel.send({
         threadId: message.threadId,
         text: [
-          '**Hydra commands:**',
-          '`/remember <note>` — save to memory',
-          '`/forget` — clear memory for this thread',
-          '`/schedule <cron|ISO> <prompt>` — schedule a task',
-          '`/unschedule <id>` — remove scheduled task',
-          '`/tasks` — list scheduled tasks',
-          '`/approve <channelId> <code>` — approve a pairing request',
-          '`/revoke <channelId> <userId>` — revoke access',
-          '`/pending [channelId]` — list pending pairing requests',
-          '`/opencode-login` — connect Claude account via OAuth (owner only)',
-          '`/opencode-code <code>` — complete Claude OAuth login',
-          '`/claude-key <sk-ant-...>` — set Anthropic API key directly (owner only)',
-          '`/claude-status` — check auth status',
-          '`/copilot-login` — connect GitHub Copilot',
-          '`/copilot-status` — check Copilot auth status',
-          '`/model [name]` — show or switch AI model',
-          '`/vision-usage` — check vision budget usage',
-          '`/link [accountId]` — link identity for cross-channel sessions',
-          '`/handoff <channelId>` — send session summary to another channel',
-          '`/diff` — show git diff of current worktree',
-          '`/rollback` — git stash pop in current worktree',
-          '`/fast <msg>` — quick chat (no OpenCode overhead)',
-          '`/code <msg>` — force code route',
-          '`/computer <task>` — control the Mac desktop',
+          'Hydra commands:',
+          '/remember <note> — save to memory',
+          '/forget — clear memory for this thread',
+          '/schedule <cron|ISO> <prompt> — schedule a task',
+          '/unschedule <id> — remove scheduled task',
+          '/tasks — list scheduled tasks',
+          '/approve <channelId> <code> — approve a pairing request',
+          '/revoke <channelId> <userId> — revoke access',
+          '/pending [channelId] — list pending pairing requests',
+          '/opencode-login — connect Claude account via OAuth (owner only)',
+          '/opencode-code <code> — complete Claude OAuth login',
+          '/claude-key <sk-ant-...> — set Anthropic API key directly (owner only)',
+          '/claude-status — check auth status',
+          '/copilot-login — connect GitHub Copilot',
+          '/copilot-status — check Copilot auth status',
+          '/model [name] — show or switch AI model',
+          '/vision-usage — check vision budget usage',
+          '/link [accountId] — link identity for cross-channel sessions',
+          '/handoff <channelId> — send session summary to another channel',
+          '/diff — show git diff of current worktree',
+          '/rollback — git stash pop in current worktree',
+          '/fast <msg> — quick chat (no OpenCode overhead)',
+          '/code <msg> — force code route',
+          '/computer <task> — control the Mac desktop',
           '',
           'Or just send any message to talk to the AI.',
         ].join('\n'),
@@ -162,14 +180,14 @@ export class Gateway {
 
     if (CMD_FORGET.test(text)) {
       writeMemory(message.channelId, message.threadId, '')
-      await channel.send({ threadId: message.threadId, text: '🗑️ Memory cleared.' })
+      await channel.send({ threadId: message.threadId, text: 'Memory cleared.' })
       return
     }
 
     const rememberMatch = CMD_REMEMBER.exec(text)
     if (rememberMatch) {
       appendMemory(message.channelId, message.threadId, rememberMatch[1])
-      await channel.send({ threadId: message.threadId, text: '✅ Remembered.' })
+      await channel.send({ threadId: message.threadId, text: 'Remembered.' })
       return
     }
 
@@ -178,7 +196,7 @@ export class Gateway {
       if (!tasks.length) await channel.send({ threadId: message.threadId, text: 'No scheduled tasks.' })
       else await channel.send({
         threadId: message.threadId,
-        text: tasks.map((t) => `• \`${t.id}\` — _${t.prompt.slice(0, 60)}_ — next: ${t.nextRunAt.toISOString()}`).join('\n'),
+        text: tasks.map((t) => `${t.id} — ${t.prompt.slice(0, 60)} — next: ${t.nextRunAt.toISOString()}`).join('\n'),
       })
       return
     }
@@ -186,7 +204,7 @@ export class Gateway {
     const unschedMatch = CMD_UNSCHEDULE.exec(text)
     if (unschedMatch) {
       const removed = this.scheduler.remove(unschedMatch[1])
-      await channel.send({ threadId: message.threadId, text: removed ? '✅ Task removed.' : '❌ Task not found.' })
+      await channel.send({ threadId: message.threadId, text: removed ? 'Task removed.' : 'Task not found.' })
       return
     }
 
@@ -197,13 +215,13 @@ export class Gateway {
     const approveMatch = CMD_APPROVE.exec(text)
     if (approveMatch) {
       if (!this.isOwner(message.channelId, message.senderId)) {
-        await channel.send({ threadId: message.threadId, text: '❌ Only the bot owner can approve pairing.' })
+        await channel.send({ threadId: message.threadId, text: 'Only the bot owner can approve pairing.' })
         return
       }
       const result = approvePairing(approveMatch[1], approveMatch[2])
       await channel.send({
         threadId: message.threadId,
-        text: result.ok ? `✅ Approved sender \`${result.senderId}\` on ${approveMatch[1]}.` : '❌ Code not found or expired.',
+        text: result.ok ? `Approved sender ${result.senderId} on ${approveMatch[1]}.` : 'Code not found or expired.',
       })
       return
     }
@@ -211,18 +229,18 @@ export class Gateway {
     const revokeMatch = CMD_REVOKE.exec(text)
     if (revokeMatch) {
       if (!this.isOwner(message.channelId, message.senderId)) {
-        await channel.send({ threadId: message.threadId, text: '❌ Only the bot owner can revoke access.' })
+        await channel.send({ threadId: message.threadId, text: 'Only the bot owner can revoke access.' })
         return
       }
       const ok = revokePairing(revokeMatch[1], revokeMatch[2])
-      await channel.send({ threadId: message.threadId, text: ok ? `✅ Access revoked.` : '❌ Sender not found.' })
+      await channel.send({ threadId: message.threadId, text: ok ? 'Access revoked.' : 'Sender not found.' })
       return
     }
 
     const pendingMatch = CMD_PENDING.exec(text)
     if (pendingMatch) {
       if (!this.isOwner(message.channelId, message.senderId)) {
-        await channel.send({ threadId: message.threadId, text: '❌ Only the bot owner can list pending requests.' })
+        await channel.send({ threadId: message.threadId, text: 'Only the bot owner can list pending requests.' })
         return
       }
       const cid = pendingMatch[1] ?? message.channelId
@@ -230,7 +248,7 @@ export class Gateway {
       if (!requests.length) await channel.send({ threadId: message.threadId, text: `No pending requests for ${cid}.` })
       else await channel.send({
         threadId: message.threadId,
-        text: requests.map((r) => `• \`${r.id}\` — code: \`${r.code}\` — expires: ${r.expiresAt}`).join('\n'),
+        text: requests.map((r) => `${r.id} — code: ${r.code} — expires: ${r.expiresAt}`).join('\n'),
       })
       return
     }
@@ -238,7 +256,7 @@ export class Gateway {
     // ── Anthropic OAuth login ─────────────────────────────────────────────────
     if (CMD_LOGIN.test(text)) {
       if (!this.isOwner(message.channelId, message.senderId)) {
-        await channel.send({ threadId: message.threadId, text: '❌ Only the bot owner can run this command.' })
+        await channel.send({ threadId: message.threadId, text: 'Only the bot owner can run this command.' })
         return
       }
       const { url, verifier } = buildAuthUrl()
@@ -247,16 +265,16 @@ export class Gateway {
       await channel.send({
         threadId: message.threadId,
         text: [
-          '🔐 **Claude Account Login**',
+          'Claude Account Login',
           '',
           '1. Open this URL and sign in with your Claude account:',
-          `\`${url}\``,
+          url,
           '',
-          '2. After authorizing, you\'ll see a code on the page.',
+          '2. After authorizing, you will see a code on the page.',
           '3. Send it back here with:',
-          '`/opencode-code <paste-the-code>`',
+          '/opencode-code <paste-the-code>',
           '',
-          '_This creates a real API key linked to your account._',
+          'This links your Claude account to the bot.',
         ].join('\n'),
       })
       return
@@ -265,39 +283,40 @@ export class Gateway {
     const codeMatch = CMD_CODE.exec(text)
     if (codeMatch) {
       if (!this.isOwner(message.channelId, message.senderId)) {
-        await channel.send({ threadId: message.threadId, text: '❌ Only the bot owner can run this command.' })
+        await channel.send({ threadId: message.threadId, text: 'Only the bot owner can run this command.' })
         return
       }
       const oauthKey = `${message.channelId}:${message.senderId}`
       const pending = this.pendingOAuth.get(oauthKey)
       if (!pending) {
-        await channel.send({ threadId: message.threadId, text: '❌ No pending login. Run `/opencode-login` first.' })
+        await channel.send({ threadId: message.threadId, text: 'No pending login. Run /opencode-login first.' })
         return
       }
       if (Date.now() - pending.createdAt > 10 * 60 * 1000) {
         this.pendingOAuth.delete(oauthKey)
-        await channel.send({ threadId: message.threadId, text: '❌ Login expired. Run `/opencode-login` again.' })
+        await channel.send({ threadId: message.threadId, text: 'Login expired. Run /opencode-login again.' })
         return
       }
-      await channel.send({ threadId: message.threadId, text: '⏳ Exchanging code for API key...' })
+      await channel.send({ threadId: message.threadId, text: 'Exchanging code...' })
       try {
-        const apiKey = await exchangeCodeForKey(codeMatch[1], pending.verifier)
+        const result = await exchangeCode(codeMatch[1], pending.verifier)
         this.pendingOAuth.delete(oauthKey)
-        saveApiKey(apiKey)
-        process.env.ANTHROPIC_API_KEY = apiKey
-        await channel.send({
-          threadId: message.threadId,
-          text: [
-            '✅ **Claude API key created and saved!**',
-            `Model: \`${process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'}\``,
-            `Key: \`...${apiKey.slice(-8)}\``,
-            '',
-            '_Your Claude account is now linked. OpenCode will use it too._',
-          ].join('\n'),
-        })
+        saveResult(result)
+        if (result.type === 'api_key') {
+          process.env.ANTHROPIC_API_KEY = result.apiKey
+          await channel.send({
+            threadId: message.threadId,
+            text: `Claude API key created and saved!\nModel: ${process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'}\nKey: ...${result.apiKey.slice(-8)}\n\nYour Claude account is now linked. Delete this message for security.`,
+          })
+        } else {
+          await channel.send({
+            threadId: message.threadId,
+            text: 'Claude OAuth tokens saved!\n\nOpenCode is now authenticated with your Claude account.\nChat and code tasks will use it via OpenCode.',
+          })
+        }
       } catch (e) {
         log.error('[opencode-login] exchange failed:', e)
-        await channel.send({ threadId: message.threadId, text: `❌ Login failed: ${e instanceof Error ? e.message : e}` })
+        await channel.send({ threadId: message.threadId, text: `Login failed: ${e instanceof Error ? e.message : e}` })
       }
       return
     }
@@ -305,14 +324,14 @@ export class Gateway {
     // ── Copilot commands ───────────────────────────────────────────────────────
     if (CMD_COPILOT.test(text)) {
       if (!this.isOwner(message.channelId, message.senderId)) {
-        await channel.send({ threadId: message.threadId, text: '❌ Only the bot owner can configure Copilot.' })
+        await channel.send({ threadId: message.threadId, text: 'Only the bot owner can configure Copilot.' })
         return
       }
-      await channel.send({ threadId: message.threadId, text: '🔗 Starting GitHub Copilot login...\n(check the server terminal for the device code)' })
+      await channel.send({ threadId: message.threadId, text: 'Starting GitHub Copilot login...\n(check the server terminal for the device code)' })
       githubCopilotLogin().then(() => {
-        channel.send({ threadId: message.threadId, text: '✅ GitHub Copilot connected!' }).catch(() => {})
+        channel.send({ threadId: message.threadId, text: 'GitHub Copilot connected!' }).catch(() => {})
       }).catch((e) => {
-        channel.send({ threadId: message.threadId, text: `❌ Copilot login failed: ${e}` }).catch(() => {})
+        channel.send({ threadId: message.threadId, text: `Copilot login failed: ${e}` }).catch(() => {})
       })
       return
     }
@@ -320,14 +339,14 @@ export class Gateway {
     if (CMD_COPILOT_STATUS.test(text)) {
       const configured = isCopilotConfigured()
       if (!configured) {
-        await channel.send({ threadId: message.threadId, text: '❌ Copilot not configured. Run `/copilot-login` first.' })
+        await channel.send({ threadId: message.threadId, text: 'Copilot not configured. Run /copilot-login first.' })
       } else {
         const creds = await resolveCopilotCredentials().catch(() => null)
         if (creds) {
           const expiresIn = Math.round((creds.expiresAt - Date.now()) / 60_000)
-          await channel.send({ threadId: message.threadId, text: `✅ Copilot active\nModel: \`${process.env.HYDRA_COPILOT_MODEL ?? 'claude-sonnet-4.6'}\`\nToken expires in: ${expiresIn} min` })
+          await channel.send({ threadId: message.threadId, text: `Copilot active\nModel: ${process.env.HYDRA_COPILOT_MODEL ?? 'claude-sonnet-4.6'}\nToken expires in: ${expiresIn} min` })
         } else {
-          await channel.send({ threadId: message.threadId, text: '⚠️ Copilot configured but token refresh failed.' })
+          await channel.send({ threadId: message.threadId, text: 'Copilot configured but token refresh failed.' })
         }
       }
       return
@@ -341,19 +360,19 @@ export class Gateway {
 
       if (!modelMatch[1]) {
         const current = process.env.HYDRA_CLAUDE_MODEL ?? (usingCopilot ? 'claude-sonnet-4.6' : 'claude-sonnet-4-6')
-        const fmt = (m: string) => m === current ? `• \`${m}\` ← current` : `• \`${m}\``
+        const fmt = (m: string) => m === current ? `${m} (current)` : m
         await channel.send({
           threadId: message.threadId,
           text: [
-            `**Current model:** \`${current}\``,
+            `Current model: ${current}`,
             '',
-            '**Anthropic API:**',
+            'Anthropic API:',
             CLAUDE_MODELS.map(fmt).join('\n'),
             '',
-            '**GitHub Copilot** _(requires /copilot-login)_:',
+            'GitHub Copilot (requires /copilot-login):',
             COPILOT_MODELS.map(fmt).join('\n'),
             '',
-            'Switch with `/model <name>`',
+            'Switch with /model <name>',
           ].join('\n'),
         })
         return
@@ -364,50 +383,49 @@ export class Gateway {
         (m) => m.toLowerCase() === requested || m.toLowerCase().includes(requested)
       )
       if (!match) {
-        await channel.send({ threadId: message.threadId, text: `❌ Unknown model \`${requested}\`\nRun \`/model\` to see available models.` })
+        await channel.send({ threadId: message.threadId, text: `Unknown model ${requested}\nRun /model to see available models.` })
         return
       }
       process.env.HYDRA_CLAUDE_MODEL = match
-      const fs2 = await import('node:fs')
-      const path2 = await import('node:path')
-      const os2 = await import('node:os')
-      const prefPath = path2.join(os2.homedir(), '.hydra', 'preferences.json')
+      const prefPath = path.join(os.homedir(), '.hydra', 'preferences.json')
       let prefs: Record<string, string> = {}
-      try { prefs = JSON.parse(fs2.readFileSync(prefPath, 'utf8')) } catch {}
+      try { prefs = JSON.parse(fs.readFileSync(prefPath, 'utf8')) } catch {}
       prefs.HYDRA_CLAUDE_MODEL = match
-      fs2.mkdirSync(path2.dirname(prefPath), { recursive: true })
-      fs2.writeFileSync(prefPath, JSON.stringify(prefs, null, 2))
-      await channel.send({ threadId: message.threadId, text: `✅ Switched to \`${match}\`\nAll new messages will use this model.` })
+      fs.mkdirSync(path.dirname(prefPath), { recursive: true })
+      fs.writeFileSync(prefPath, JSON.stringify(prefs, null, 2))
+      await channel.send({ threadId: message.threadId, text: `Switched to ${match}\nAll new messages will use this model.` })
       return
     }
 
     const claudeKeyMatch = CMD_CLAUDE_KEY.exec(text)
     if (claudeKeyMatch) {
       if (!this.isOwner(message.channelId, message.senderId)) {
-        await channel.send({ threadId: message.threadId, text: '❌ Only the bot owner can set the API key.' })
+        await channel.send({ threadId: message.threadId, text: 'Only the bot owner can set the API key.' })
         return
       }
       const key = claudeKeyMatch[1].trim()
       if (!key.startsWith('sk-ant-')) {
-        await channel.send({ threadId: message.threadId, text: '❌ Invalid key format — should start with `sk-ant-`' })
+        await channel.send({ threadId: message.threadId, text: 'Invalid key format — should start with sk-ant-' })
         return
       }
       saveApiKey(key)
       process.env.ANTHROPIC_API_KEY = key
-      await channel.send({ threadId: message.threadId, text: `✅ Claude API key saved!\nModel: \`${process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'}\`\nKey ends in: \`...${key.slice(-6)}\`\n\n_Delete this message for security._` })
+      await channel.send({ threadId: message.threadId, text: `Claude API key saved!\nModel: ${process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'}\nKey ends in: ...${key.slice(-6)}\n\nDelete this message for security.` })
       return
     }
 
     if (CMD_CLAUDE_STATUS.test(text)) {
       const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'
       if (isClaudeConfigured()) {
-        await channel.send({ threadId: message.threadId, text: `✅ Claude active (API key)\nModel: \`${model}\`\nKey: \`...${process.env.ANTHROPIC_API_KEY!.slice(-6)}\`` })
+        await channel.send({ threadId: message.threadId, text: `Claude active (API key)\nModel: ${model}\nKey: ...${process.env.ANTHROPIC_API_KEY!.slice(-6)}` })
+      } else if (hasOpencodeAuth()) {
+        await channel.send({ threadId: message.threadId, text: `Claude OAuth tokens active (via opencode)\nModel: ${model}\nOpenCode will use your Claude account for code tasks.` })
       } else {
         const oauthToken = getValidClaudeToken()
         if (oauthToken) {
-          await channel.send({ threadId: message.threadId, text: `⚠️ Claude OAuth token found but cannot call API directly.\nRun \`/opencode-login\` to create a real API key from your account.` })
+          await channel.send({ threadId: message.threadId, text: 'Claude OAuth token found but cannot call API directly.\nRun /opencode-login to link your Claude account.' })
         } else {
-          await channel.send({ threadId: message.threadId, text: '❌ No Claude credentials\n• Run `/opencode-login` — log in with your Claude account\n• Or `/claude-key sk-ant-...` — paste a key directly' })
+          await channel.send({ threadId: message.threadId, text: 'No Claude credentials\n• Run /opencode-login — log in with your Claude account\n• Or /claude-key sk-ant-... — paste a key directly' })
         }
       }
       return
@@ -415,7 +433,7 @@ export class Gateway {
 
     if (CMD_VISION_USAGE.test(text)) {
       const { count, budget, remaining } = getVisionUsageStatus()
-      await channel.send({ threadId: message.threadId, text: `👁️ Vision usage today: ${count}/${budget} calls used, ${remaining} remaining.` })
+      await channel.send({ threadId: message.threadId, text: `Vision usage today: ${count}/${budget} calls used, ${remaining} remaining.` })
       return
     }
 
@@ -424,7 +442,7 @@ export class Gateway {
     if (linkMatch) {
       const accountId = linkMatch[1] ?? `${message.channelId}:${message.senderId}`
       this.sessions.linkAccount(message.channelId, message.senderId, accountId)
-      await channel.send({ threadId: message.threadId, text: `🔗 Linked! Your account ID: \`${accountId}\`\nUse this same ID with \`/link\` in other channels to share sessions.` })
+      await channel.send({ threadId: message.threadId, text: `Linked! Your account ID: ${accountId}\nUse this same ID with /link in other channels to share sessions.` })
       return
     }
 
@@ -433,15 +451,15 @@ export class Gateway {
       const targetChannelId = handoffMatch[1]
       const targetChannel = this.registry.get(targetChannelId as any)
       if (!targetChannel) {
-        await channel.send({ threadId: message.threadId, text: `❌ Channel \`${targetChannelId}\` not found.` })
+        await channel.send({ threadId: message.threadId, text: `Channel ${targetChannelId} not found.` })
         return
       }
       const session = this.sessions.getOrCreate(message)
       const summary = session.opencodeSessionId
-        ? `🤝 Session handoff from ${message.channelId}\nSession: \`${session.opencodeSessionId}\`\nWorkdir: \`${session.workdir}\``
-        : `🤝 Handoff from ${message.channelId} — no active session yet.`
+        ? `Session handoff from ${message.channelId}\nSession: ${session.opencodeSessionId}\nWorkdir: ${session.workdir}`
+        : `Handoff from ${message.channelId} — no active session yet.`
       await targetChannel.send({ threadId: message.threadId, text: summary })
-      await channel.send({ threadId: message.threadId, text: `✅ Session summary sent to ${targetChannelId}.` })
+      await channel.send({ threadId: message.threadId, text: `Session summary sent to ${targetChannelId}.` })
       return
     }
 
@@ -475,8 +493,8 @@ export class Gateway {
     const channel = this.registry.get(message.channelId)
     if (!channel) return
 
-    // Guard: no credentials → tell user how to set up
-    if (!isClaudeConfigured() && !isCopilotConfigured()) {
+    // Guard: no credentials at all
+    if (!hasAnyCredentials()) {
       await channel.send({ threadId: message.threadId, text: NO_CREDS_MSG })
       return
     }
@@ -507,13 +525,13 @@ export class Gateway {
         return
       }
 
-      // ── Direct chat via Claude/Copilot (Phase 6B) ─────────────────────────
+      // ── Direct chat via Claude API key or Copilot ─────────────────────────
       if (intent === 'fast' || (intent === 'chat' && (isClaudeConfigured() || isCopilotConfigured()))) {
         await this.runDirectChat(message, fullPrompt, message.images, channel)
         return
       }
 
-      // ── OpenCode session (code / vision / chat fallback) ──────────────────
+      // ── OpenCode session (code / vision / chat fallback with oauth tokens) ─
       await channel.sendTyping(message.threadId)
 
       const placeholderId = await channel.sendAndGetId({
@@ -558,7 +576,7 @@ export class Gateway {
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') return
       log.error(`[${key}] Error:`, err)
-      await channel.send({ threadId: message.threadId, text: '❌ Something went wrong. Please try again.', replyToId: message.id }).catch(() => {})
+      await channel.send({ threadId: message.threadId, text: 'Something went wrong. Please try again.', replyToId: message.id }).catch(() => {})
     } finally {
       this.activeRuns.delete(key)
     }
@@ -579,7 +597,7 @@ export class Gateway {
       })
     } catch (e) {
       log.error(`[runDirectChat] ${e}`)
-      await channel.editMessage(message.threadId, placeholderId, `❌ ${e}`).catch(() => {})
+      await channel.editMessage(message.threadId, placeholderId, `Error: ${e}`).catch(() => {})
     }
   }
 
@@ -594,13 +612,13 @@ export class Gateway {
           await channel.editMessage(message.threadId, placeholderId, `🖥️ ${msg}`).catch(() => {})
         },
       })
-      const summary = result.success ? `✅ Done!\n${result.output}` : `❌ Failed: ${result.output}`
+      const summary = result.success ? `Done!\n${result.output}` : `Failed: ${result.output}`
       const stats = `\n_(${result.iterations} steps, ${result.visionCallsUsed} vision calls)_`
       await channel.editMessage(message.threadId, placeholderId, summary + stats).catch(() => {
         channel.send({ threadId: message.threadId, text: summary + stats })
       })
     } catch (e) {
-      await channel.editMessage(message.threadId, placeholderId, `❌ Computer task error: ${e}`).catch(() => {})
+      await channel.editMessage(message.threadId, placeholderId, `Computer task error: ${e}`).catch(() => {})
     }
   }
 
@@ -615,14 +633,14 @@ export class Gateway {
       scheduleStr = parts.slice(0, 5).join(' '); promptStr = parts.slice(5).join(' ')
     }
     if (!promptStr.trim()) {
-      await channel.send({ threadId: message.threadId, text: '❌ Usage: `/schedule <cron|ISO> <prompt>`' }); return
+      await channel.send({ threadId: message.threadId, text: 'Usage: /schedule <cron|ISO> <prompt>' }); return
     }
     const id = `task_${Date.now()}`
     this.scheduler.add({
       id, channelId: message.channelId, threadId: message.threadId, prompt: promptStr,
       schedule: /^\d{4}/.test(scheduleStr) ? { type: 'once', at: new Date(scheduleStr) } : { type: 'cron', expr: scheduleStr },
     })
-    await channel.send({ threadId: message.threadId, text: `✅ Task \`${id}\` scheduled.\nPrompt: _${promptStr}_\nSchedule: \`${scheduleStr}\`` })
+    await channel.send({ threadId: message.threadId, text: `Task ${id} scheduled.\nPrompt: ${promptStr}\nSchedule: ${scheduleStr}` })
   }
 
   private async handlePRCheckout(message: InboundMessage, prNumber: number): Promise<void> {
@@ -632,17 +650,17 @@ export class Gateway {
     try {
       const result = await createFromPR({ baseDirectory: this.config.workdir, prNumber })
       if (result instanceof Error) {
-        await channel.editMessage(message.threadId, placeholderId, `❌ PR checkout failed: ${result.message}`).catch(() => {})
+        await channel.editMessage(message.threadId, placeholderId, `PR checkout failed: ${result.message}`).catch(() => {})
         return
       }
       const session = this.sessions.getOrCreate(message)
       session.worktree = result
       session.workdir = result.directory
       await channel.editMessage(message.threadId, placeholderId,
-        `✅ PR #${prNumber} checked out!\nBranch: \`${result.branch}\`\nWorkdir: \`${result.directory}\`\n\nNow send your instructions.`
+        `PR #${prNumber} checked out!\nBranch: ${result.branch}\nWorkdir: ${result.directory}\n\nNow send your instructions.`
       ).catch(() => {})
     } catch (e) {
-      await channel.editMessage(message.threadId, placeholderId, `❌ Error: ${e}`).catch(() => {})
+      await channel.editMessage(message.threadId, placeholderId, `Error: ${e}`).catch(() => {})
     }
   }
 
