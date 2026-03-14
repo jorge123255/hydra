@@ -1,6 +1,7 @@
 // Worktree manager — per-thread git worktrees so parallel sessions
 // don't stomp each other's working trees.
 // Ported from Kimaki's worktrees.ts, generalized for any channel.
+// Phase 10: createFromPR() for GitHub PR worktrees.
 
 import { exec } from 'node:child_process'
 import fs from 'node:fs'
@@ -19,6 +20,7 @@ export type WorktreeInfo = {
   directory: string
   branch: string
   baseDirectory: string
+  prNumber?: number
 }
 
 // Lockfile → install command detection (from Kimaki)
@@ -46,7 +48,6 @@ async function run(
 }
 
 async function resolveDefaultBranch(directory: string): Promise<string> {
-  // Try origin/HEAD first, then common branch names
   try {
     const { stdout } = await run('git symbolic-ref refs/remotes/origin/HEAD', directory)
     const branch = stdout.trim().replace('refs/remotes/origin/', '')
@@ -126,6 +127,61 @@ export async function createWorktree({
   return { name, directory: worktreeDir, branch: branch.trim(), baseDirectory }
 }
 
+/** Phase 10: Checkout a GitHub PR into its own worktree.
+ *  Requires: `gh` CLI in PATH and GITHUB_TOKEN env var. */
+export async function createFromPR({
+  baseDirectory,
+  prNumber,
+}: {
+  baseDirectory: string
+  prNumber: number
+}): Promise<WorktreeInfo | Error> {
+  const name = `pr-${prNumber}`
+  const worktreeDir = getManagedWorktreeDir(baseDirectory, name)
+
+  // If worktree already exists just return it
+  if (fs.existsSync(worktreeDir)) {
+    const { stdout } = await run('git branch --show-current', worktreeDir).catch(() => ({ stdout: name }))
+    log.info(`PR worktree already exists: ${worktreeDir}`)
+    return { name, directory: worktreeDir, branch: stdout.trim(), baseDirectory, prNumber }
+  }
+
+  await fs.promises.mkdir(path.dirname(worktreeDir), { recursive: true })
+
+  // Use `gh pr checkout` to fetch + checkout the PR branch
+  log.info(`Checking out PR #${prNumber} into worktree ${worktreeDir}`)
+  try {
+    const env = process.env.GITHUB_TOKEN ? `GITHUB_TOKEN=${process.env.GITHUB_TOKEN} ` : ''
+    await run(
+      `${env}gh pr checkout ${prNumber} --force -b ${JSON.stringify(name)}`,
+      baseDirectory,
+      EXEC_TIMEOUT_MS * 3,
+    )
+  } catch (err) {
+    return new Error(`gh pr checkout failed: ${String(err)}`)
+  }
+
+  // Move checked-out branch into a worktree
+  try {
+    await run(
+      `git worktree add ${JSON.stringify(worktreeDir)} ${JSON.stringify(name)}`,
+      baseDirectory,
+      EXEC_TIMEOUT_MS * 2,
+    )
+  } catch (err) {
+    return new Error(`git worktree add (PR) failed: ${String(err)}`)
+  }
+
+  const installCmd = detectInstallCommand(baseDirectory)
+  if (installCmd) {
+    try { await run(installCmd, worktreeDir, SUBMODULE_TIMEOUT_MS) }
+    catch (err) { log.warn(`Install failed in PR worktree (non-fatal): ${String(err)}`) }
+  }
+
+  log.info(`PR #${prNumber} worktree ready: ${worktreeDir}`)
+  return { name, directory: worktreeDir, branch: name, baseDirectory, prNumber }
+}
+
 export async function deleteWorktree({
   baseDirectory,
   name,
@@ -140,11 +196,9 @@ export async function deleteWorktree({
   try {
     await run(`git worktree remove --force ${JSON.stringify(worktreeDir)}`, baseDirectory)
   } catch {
-    // Force-remove the directory if git worktree remove fails
     await fs.promises.rm(worktreeDir, { recursive: true, force: true })
   }
 
-  // Prune stale worktree metadata
   await run('git worktree prune', baseDirectory).catch(() => {})
 }
 
@@ -154,5 +208,25 @@ export async function isGitRepo(directory: string): Promise<boolean> {
     return true
   } catch {
     return false
+  }
+}
+
+/** Get the diff of a worktree vs HEAD */
+export async function getWorktreeDiff(directory: string): Promise<string> {
+  try {
+    const { stdout } = await run('git diff HEAD', directory, 30_000)
+    return stdout || '(no changes vs HEAD)'
+  } catch (err) {
+    return `Error getting diff: ${String(err)}`
+  }
+}
+
+/** Stash pop (rollback) in a worktree */
+export async function rollbackWorktree(directory: string): Promise<string> {
+  try {
+    const { stdout } = await run('git stash pop', directory, 15_000)
+    return stdout || '✅ Stash popped'
+  } catch (err) {
+    return `Error rolling back: ${String(err)}`
   }
 }

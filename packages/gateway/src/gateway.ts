@@ -5,6 +5,8 @@
 // Phase 6A: GitHub Copilot OAuth (/copilot-login command)
 // Phase 6B: intent routing (code/chat/vision/computer)
 // Phase 7: computer-use via @hydra/computer-use
+// Phase 9: cross-channel session continuity (/link, /handoff)
+// Phase 10: GitHub PR worktrees (/diff, /rollback, auto PR#N detection)
 
 import { ChannelRegistry, type InboundMessage, type ChannelEvent } from '@hydra/core'
 import { SessionManager } from './session-manager.js'
@@ -16,6 +18,7 @@ import { createLogger } from './logger.js'
 import { isAllowed, upsertPairingRequest, approvePairing, revokePairing, listPendingRequests } from './pairing.js'
 import { classifyIntent, stripIntentPrefix } from './router.js'
 import { isCopilotConfigured, githubCopilotLogin, resolveCopilotCredentials, getVisionUsageStatus } from './copilot-chat.js'
+import { createFromPR, getWorktreeDiff, rollbackWorktree } from './worktree-manager.js'
 
 const log = createLogger('gateway')
 
@@ -37,6 +40,11 @@ const CMD_PENDING    = /^\/pending(?:\s+(\S+))?$/i     // /pending [channelId]
 const CMD_COPILOT    = /^\/copilot-login$/i
 const CMD_COPILOT_STATUS = /^\/copilot-status$/i
 const CMD_VISION_USAGE = /^\/vision-usage$/i
+const CMD_LINK       = /^\/link(?:\s+(\S+))?$/i          // /link [accountId]
+const CMD_HANDOFF    = /^\/handoff\s+(\S+)/i              // /handoff {channelId}
+const CMD_DIFF       = /^\/diff$/i
+const CMD_ROLLBACK   = /^\/rollback$/i
+const PR_PATTERN     = /\bpr\s*#(\d+)/i                  // auto-detect "PR #42" in messages
 
 export class Gateway {
   private registry: ChannelRegistry
@@ -119,6 +127,10 @@ export class Gateway {
           '`/copilot-login` — connect GitHub Copilot (free claude-sonnet-4.6)',
           '`/copilot-status` — check Copilot auth status',
           '`/vision-usage` — check vision budget usage',
+          '`/link [accountId]` — link your identity for cross-channel sessions',
+          '`/handoff <channelId>` — send session summary to another channel',
+          '`/diff` — show git diff of current worktree',
+          '`/rollback` — git stash pop in current worktree',
           '`/fast <msg>` — quick chat (no OpenCode overhead)',
           '`/code <msg>` — force code route',
           '`/computer <task>` — control the Mac desktop',
@@ -238,6 +250,55 @@ export class Gateway {
     if (CMD_VISION_USAGE.test(text)) {
       const { count, budget, remaining } = getVisionUsageStatus()
       await channel.send({ threadId: message.threadId, text: `👁️ Vision usage today: ${count}/${budget} calls used, ${remaining} remaining.` })
+      return
+    }
+
+    // ── Phase 9: cross-channel commands ─────────────────────────────────────
+    const linkMatch = CMD_LINK.exec(text)
+    if (linkMatch) {
+      const accountId = linkMatch[1] ?? `${message.channelId}:${message.senderId}`
+      this.sessions.linkAccount(message.channelId, message.senderId, accountId)
+      await channel.send({ threadId: message.threadId, text: `🔗 Linked! Your account ID: \`${accountId}\`\nUse this same ID with \`/link\` in other channels to share sessions.` })
+      return
+    }
+
+    const handoffMatch = CMD_HANDOFF.exec(text)
+    if (handoffMatch) {
+      const targetChannelId = handoffMatch[1]
+      const targetChannel = this.registry.get(targetChannelId as any)
+      if (!targetChannel) {
+        await channel.send({ threadId: message.threadId, text: `❌ Channel \`${targetChannelId}\` not found.` })
+        return
+      }
+      const session = this.sessions.getOrCreate(message)
+      const summary = session.opencodeSessionId
+        ? `🤝 Session handoff from ${message.channelId}\nSession: \`${session.opencodeSessionId}\`\nWorkdir: \`${session.workdir}\``
+        : `🤝 Handoff from ${message.channelId} — no active session yet.`
+      await targetChannel.send({ threadId: message.threadId, text: summary })
+      await channel.send({ threadId: message.threadId, text: `✅ Session summary sent to ${targetChannelId}.` })
+      return
+    }
+
+    // ── Phase 10: worktree commands ───────────────────────────────────────
+    if (CMD_DIFF.test(text)) {
+      const session = this.sessions.getOrCreate(message)
+      const diff = await getWorktreeDiff(session.workdir)
+      const truncated = diff.length > 3000 ? diff.slice(0, 3000) + '\n...(truncated)' : diff
+      await channel.send({ threadId: message.threadId, text: `\`\`\`diff\n${truncated}\n\`\`\`` })
+      return
+    }
+
+    if (CMD_ROLLBACK.test(text)) {
+      const session = this.sessions.getOrCreate(message)
+      const result = await rollbackWorktree(session.workdir)
+      await channel.send({ threadId: message.threadId, text: result })
+      return
+    }
+
+    // ── Phase 10: auto PR#N detection ────────────────────────────────────
+    const prMatch = PR_PATTERN.exec(text)
+    if (prMatch && this.config.worktrees) {
+      await this.handlePRCheckout(message, parseInt(prMatch[1], 10))
       return
     }
 
@@ -393,6 +454,28 @@ export class Gateway {
       schedule: /^\d{4}/.test(scheduleStr) ? { type: 'once', at: new Date(scheduleStr) } : { type: 'cron', expr: scheduleStr },
     })
     await channel.send({ threadId: message.threadId, text: `✅ Task \`${id}\` scheduled.\nPrompt: _${promptStr}_\nSchedule: \`${scheduleStr}\`` })
+  }
+
+  private async handlePRCheckout(message: InboundMessage, prNumber: number): Promise<void> {
+    const channel = this.registry.get(message.channelId)
+    if (!channel) return
+    const placeholderId = await channel.sendAndGetId({ threadId: message.threadId, text: `⏳ _Checking out PR #${prNumber}..._` })
+    try {
+      const result = await createFromPR({ baseDirectory: this.config.workdir, prNumber })
+      if (result instanceof Error) {
+        await channel.editMessage(message.threadId, placeholderId, `❌ PR checkout failed: ${result.message}`).catch(() => {})
+        return
+      }
+      // Assign worktree to this session
+      const session = this.sessions.getOrCreate(message)
+      session.worktree = result
+      session.workdir = result.directory
+      await channel.editMessage(message.threadId, placeholderId,
+        `✅ PR #${prNumber} checked out!\nBranch: \`${result.branch}\`\nWorkdir: \`${result.directory}\`\n\nNow send your instructions (e.g. "fix the failing tests").`
+      ).catch(() => {})
+    } catch (e) {
+      await channel.editMessage(message.threadId, placeholderId, `❌ Error: ${e}`).catch(() => {})
+    }
   }
 
   private async fireScheduledTask(task: ScheduledTask): Promise<void> {
