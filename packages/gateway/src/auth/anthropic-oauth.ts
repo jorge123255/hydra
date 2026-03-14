@@ -1,5 +1,5 @@
 // PKCE OAuth flow for Anthropic/Claude accounts.
-// Replicates what `opencode auth login` does internally.
+// Replicates what opencode-anthropic-auth@0.0.13 does internally.
 // After OAuth, creates a real API key via the CLI endpoint.
 
 import crypto from 'node:crypto'
@@ -8,11 +8,12 @@ import path from 'node:path'
 import os from 'node:os'
 
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
-const AUTH_URL = 'https://claude.ai/oauth/authorize'
-const TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token'
-const CREATE_KEY_URL = 'https://api.anthropic.com/api/oauth/claude_cli/create_api_key'
-const REDIRECT_URI = 'https://console.anthropic.com/oauth/code/callback'
-const SCOPES = 'org:create_api_key user:profile user:inference'
+// Use claude.ai for Max/Pro accounts; console.anthropic.com for API/console accounts
+const AUTH_URL_MAX     = 'https://claude.ai/oauth/authorize'
+const TOKEN_URL        = 'https://console.anthropic.com/v1/oauth/token'
+const CREATE_KEY_URL   = 'https://api.anthropic.com/api/oauth/claude_cli/create_api_key'
+const REDIRECT_URI     = 'https://console.anthropic.com/oauth/code/callback'
+const SCOPES           = 'org:create_api_key user:profile user:inference'
 const OPENCODE_AUTH_FILE = path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json')
 
 function generatePKCE(): { verifier: string; challenge: string } {
@@ -26,7 +27,7 @@ export type PendingOAuth = {
   createdAt: number
 }
 
-/** Build the authorization URL to send to the user. Returns url + verifier (keep for code exchange). */
+/** Build the authorization URL. Returns url + verifier (keep for code exchange). */
 export function buildAuthUrl(): { url: string; verifier: string } {
   const { verifier, challenge } = generatePKCE()
 
@@ -41,19 +42,32 @@ export function buildAuthUrl(): { url: string; verifier: string } {
     state: verifier, // opencode uses the verifier as state
   })
 
-  return { url: `${AUTH_URL}?${params}`, verifier }
+  return { url: `${AUTH_URL_MAX}?${params}`, verifier }
 }
 
-/** Exchange authorization code for tokens, then create a real API key. Returns sk-ant-... */
-export async function exchangeCodeForKey(code: string, verifier: string): Promise<string> {
-  // Step 1: exchange code → OAuth tokens
+/**
+ * Exchange authorization code for tokens, then create a real API key.
+ *
+ * The callback page shows a value of the form `<code>#<state>` — the user
+ * should paste the entire string (or just the code part before #).
+ * We split on # and send both code + state in the JSON body.
+ */
+export async function exchangeCodeForKey(rawCode: string, verifier: string): Promise<string> {
+  // The callback page may return "code#state" — split if present
+  const trimmed = rawCode.trim()
+  const hashIdx = trimmed.indexOf('#')
+  const code  = hashIdx >= 0 ? trimmed.slice(0, hashIdx) : trimmed
+  const state = hashIdx >= 0 ? trimmed.slice(hashIdx + 1) : verifier
+
+  // Step 1: exchange code → OAuth tokens (JSON body, not form-encoded)
   const tokenRes = await fetch(TOKEN_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
       grant_type: 'authorization_code',
       client_id: CLIENT_ID,
-      code: code.trim(),
+      code,
+      state,
       redirect_uri: REDIRECT_URI,
       code_verifier: verifier,
     }),
@@ -82,7 +96,6 @@ export async function exchangeCodeForKey(code: string, verifier: string): Promis
   }
 
   const keyData = (await createKeyRes.json()) as any
-  // Response shape varies — try a few common fields
   const apiKey: string =
     keyData?.raw_key ?? keyData?.api_key?.secret_key ?? keyData?.secret_key ?? keyData?.key ?? ''
 
@@ -95,7 +108,6 @@ export async function exchangeCodeForKey(code: string, verifier: string): Promis
 
 /** Persist API key to both ~/.hydra/credentials/anthropic.json and opencode's auth.json */
 export function saveApiKey(apiKey: string): void {
-  // 1. Hydra credentials
   const credDir = path.join(os.homedir(), '.hydra', 'credentials')
   fs.mkdirSync(credDir, { recursive: true })
   fs.writeFileSync(
@@ -104,7 +116,6 @@ export function saveApiKey(apiKey: string): void {
     { mode: 0o600 },
   )
 
-  // 2. OpenCode auth.json
   const opencodeDir = path.dirname(OPENCODE_AUTH_FILE)
   fs.mkdirSync(opencodeDir, { recursive: true })
   let existing: Record<string, unknown> = {}
