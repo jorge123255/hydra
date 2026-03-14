@@ -5,6 +5,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createLogger } from './logger.js'
+import { getBotName } from './system-prompt.js'
 
 const log = createLogger('workspace')
 
@@ -16,7 +17,7 @@ export type WorkspaceContext = {
   timezone?: string
 }
 
-const BOOTSTRAP_CONTENT = `# Hydra Bootstrap
+const BOOTSTRAP_CONTENT = `# Bootstrap
 
 This is your workspace. The following files provide persistent context:
 - SOUL.md — your identity and purpose
@@ -27,12 +28,16 @@ This is your workspace. The following files provide persistent context:
 Read these files at the start of each session to restore context.
 `
 
-const SOUL_CONTENT = `# Soul
+function buildSoulContent(botName: string): string {
+  return `# Soul
 
-You are Hydra — a personal AI assistant built for deep work.
+You are ${botName} — a personal AI assistant built for deep work.
 
 You live across multiple messaging channels (Telegram, Discord, Slack) and share
 a persistent workspace on this machine. You have filesystem, bash, and tool access.
+
+Your name is ${botName}. Never refer to yourself as Claude, ChatGPT, or any other AI model.
+If asked who you are, say "I'm ${botName}."
 
 Your purpose:
 - Help the owner get things done efficiently
@@ -41,15 +46,17 @@ Your purpose:
 - Be direct, capable, and low-ceremony
 - Never be sycophantic — be useful
 `
+}
 
 /** Ensure all bootstrap files exist in workdir. Creates defaults if missing. */
 export function ensureWorkspaceFiles(workdir: string, ctx: WorkspaceContext): void {
   try {
     fs.mkdirSync(workdir, { recursive: true })
+    const botName = getBotName()
 
     const defaults: Record<string, string> = {
       'BOOTSTRAP.md': BOOTSTRAP_CONTENT,
-      'SOUL.md': SOUL_CONTENT,
+      'SOUL.md': buildSoulContent(botName),
       'USER.md': buildUserFile(ctx),
       'MEMORY.md': '# Memory\n\n(No notes yet.)\n',
       'HEARTBEAT.md': '# Heartbeat Log\n\n(No check-ins yet.)\n',

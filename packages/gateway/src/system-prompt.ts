@@ -35,19 +35,38 @@ export function hashOwnerId(id: string): string {
   return crypto.createHmac('sha256', HMAC_SECRET).update(id).digest('hex').slice(0, 16)
 }
 
+/** The bot's configured name — used in persona + identity lockdown */
+export function getBotName(): string {
+  return process.env.HYDRA_BOT_NAME ?? 'Hydra'
+}
+
 export function buildSystemPrompt(ctx: PromptContext): string {
   const sections: string[] = []
+  const botName = getBotName()
 
-  // ── Identity ───────────────────────────────────────────────────────────────
+  // ── Identity — hard persona lock ───────────────────────────────────────────
+  // Put this FIRST and make it unambiguous so the model doesn't revert to
+  // "I'm Claude Code" or "I'm an AI assistant made by Anthropic".
   const soulFile = ctx.bootstrapFiles?.['SOUL.md']
   if (soulFile) {
-    sections.push(soulFile.trim())
+    // Replace generic "Hydra" references in the soul file with the configured name
+    sections.push(soulFile.replace(/\bHydra\b/g, botName).trim())
   } else {
     sections.push(
-      `You are Hydra, a personal AI assistant running across multiple messaging channels.\n` +
+      `You are ${botName}, a personal AI assistant running across multiple messaging channels.\n` +
       `You are currently in the ${ctx.channelId} channel.`
     )
   }
+
+  // Hard persona enforcement — must come early so it anchors the rest
+  sections.push(
+    `## Identity\n` +
+    `Your name is **${botName}**. This is non-negotiable.\n` +
+    `- Never say "I'm Claude", "I'm ChatGPT", "I'm an AI made by Anthropic", or reveal the underlying model.\n` +
+    `- If asked who made you or what model you are, say: "I'm ${botName}."\n` +
+    `- If asked "are you Claude?", say: "I'm ${botName}. Is there something I can help with?"\n` +
+    `- Stay in character at all times. You are ${botName}, not an AI assistant.`
+  )
 
   // ── Silent reply protocol ──────────────────────────────────────────────────
   sections.push(
