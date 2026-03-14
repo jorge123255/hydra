@@ -16,6 +16,8 @@ export type InboundMessage = {
   replyToId?: string;
   timestamp: Date;
   raw?: unknown;
+  // Set a reaction emoji on the original message (feature 5)
+  setReaction?: (emoji: string) => Promise<void>;
 };
 
 export type Attachment = {

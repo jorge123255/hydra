@@ -47,7 +47,29 @@ export function appendMemory(channelId: string, threadId: string, entry: string)
   writeMemory(channelId, threadId, updated)
 }
 
-function getCurrentTime(timezone?: string): string {
+/** Search memory files for a keyword/phrase. Returns matching lines with file context. */
+export function searchMemory(channelId: string, query: string): string {
+  const memDir = path.join(DATA_DIR, 'memory', channelId)
+  const results: string[] = []
+  try {
+    if (!fs.existsSync(memDir)) return 'No memory files found.'
+    const files = fs.readdirSync(memDir).filter((f) => f.endsWith('.md'))
+    const lowerQuery = query.toLowerCase()
+    for (const file of files) {
+      const content = fs.readFileSync(path.join(memDir, file), 'utf8')
+      const lines = content.split('\n')
+      const matches = lines.filter((l) => l.toLowerCase().includes(lowerQuery))
+      if (matches.length) {
+        results.push(`[${file}]`, ...matches)
+      }
+    }
+  } catch (e) {
+    log.warn(`searchMemory error: ${e}`)
+  }
+  return results.length ? results.join('\n') : `No results for "${query}".`
+}
+
+export function getCurrentTime(timezone?: string): string {
   try {
     return new Date().toLocaleString('en-US', {
       timeZone: timezone ?? 'America/Chicago',
@@ -59,9 +81,51 @@ function getCurrentTime(timezone?: string): string {
   }
 }
 
-// Build a prompt prefix with user context + memory.
-// For OpenCode queries this also includes a tool-use hint so the agent
-// fetches real-time data (weather, news, time) instead of refusing.
+/** Build a message envelope header — ported from OpenClaw (feature 3).
+ *  Format: [telegram george +2m15s Fri 14-Mar 10:30 CST]
+ */
+export function buildEnvelope(
+  channelId: string,
+  senderName: string | undefined,
+  timestamp: Date,
+  lastMessageAt?: Date
+): string {
+  const parts: string[] = [channelId]
+
+  if (senderName) parts.push(senderName)
+
+  if (lastMessageAt) {
+    const elapsedMs = timestamp.getTime() - lastMessageAt.getTime()
+    const elapsed = formatElapsed(elapsedMs)
+    if (elapsed) parts.push(`+${elapsed}`)
+  }
+
+  const tz = process.env.HYDRA_USER_TIMEZONE ?? 'America/Chicago'
+  const dateStr = timestamp.toLocaleString('en-US', {
+    timeZone: tz,
+    weekday: 'short', day: '2-digit', month: 'short',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+    timeZoneName: 'short',
+  })
+  parts.push(dateStr)
+
+  return `[${parts.join(' ')}]`
+}
+
+function formatElapsed(ms: number): string {
+  if (ms < 0) return ''
+  const totalSecs = Math.floor(ms / 1000)
+  const mins = Math.floor(totalSecs / 60)
+  const secs = totalSecs % 60
+  if (mins === 0 && secs < 5) return '' // negligible
+  if (mins === 0) return `${secs}s`
+  if (secs === 0) return `${mins}m`
+  return `${mins}m${secs}s`
+}
+
+/** Build a prompt prefix with context + memory for direct-chat calls.
+ *  For OpenCode queries this also includes a tool-use hint.
+ */
 export function buildMemoryPrompt(channelId: string, threadId: string, includeToolHint = false): string {
   const parts: string[] = []
 
@@ -69,12 +133,10 @@ export function buildMemoryPrompt(channelId: string, threadId: string, includeTo
   const timezone = process.env.HYDRA_USER_TIMEZONE
   const time = getCurrentTime(timezone)
 
-  // Context block: always injected so the model knows who/where/when
   const contextLines: string[] = [`Current time: ${time}`]
   if (location) contextLines.push(`User location: ${location}`)
   parts.push(`[Context: ${contextLines.join(' | ')}]`)
 
-  // Tool hint: tell OpenCode to actually USE bash for real-time data
   if (includeToolHint && location) {
     const city = location.split(',')[0].trim()
     parts.push(

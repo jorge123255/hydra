@@ -25,17 +25,12 @@ export function isClaudeConfigured(): boolean {
   return !!process.env.ANTHROPIC_API_KEY
 }
 
-const SYSTEM_PROMPT = `You are a personal AI assistant running inside Hydra, a multi-channel bot.
-
-Reply style:
-- Be direct and concise. Lead with the answer, not the reasoning.
-- Use plain text. No markdown headers or bullet spam unless it genuinely helps.
-- Match the user's register — casual question gets a casual answer.
-- For code or technical output, use code blocks.
-- Never start with "Certainly!", "Of course!", "Great question!" or similar filler.`
-
 /** Call Claude via Anthropic API (supports vision via base64 images) */
-export async function callClaudeDirect(prompt: string, images?: string[]): Promise<string> {
+export async function callClaudeDirect(
+  prompt: string,
+  images?: string[],
+  systemPrompt?: string
+): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) {
     throw new Error('ANTHROPIC_API_KEY not set — send /claude-key sk-ant-... to configure')
@@ -43,7 +38,6 @@ export async function callClaudeDirect(prompt: string, images?: string[]): Promi
 
   const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'
 
-  // Build content array — images first, then text
   type ImageBlock = { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
   type TextBlock  = { type: 'text'; text: string }
   const content: Array<ImageBlock | TextBlock> = []
@@ -76,7 +70,7 @@ export async function callClaudeDirect(prompt: string, images?: string[]): Promi
       body: JSON.stringify({
         model,
         max_tokens: 4096,
-        system: SYSTEM_PROMPT,
+        system: systemPrompt ?? defaultSystemPrompt(),
         messages: [{ role: 'user', content }],
       }),
       signal: controller.signal,
@@ -95,7 +89,11 @@ export async function callClaudeDirect(prompt: string, images?: string[]): Promi
 }
 
 /** Call Copilot directly — used as fallback or for vision when no API key */
-export async function callCopilotDirect(prompt: string, images?: string[]): Promise<string> {
+export async function callCopilotDirect(
+  prompt: string,
+  images?: string[],
+  systemPrompt?: string
+): Promise<string> {
   const creds = await resolveCopilotCredentials()
   if (!creds) throw new Error('Copilot not configured — run /copilot-login first')
 
@@ -125,7 +123,7 @@ export async function callCopilotDirect(prompt: string, images?: string[]): Prom
       model,
       max_tokens: 4096,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt ?? defaultSystemPrompt() },
         { role: 'user', content },
       ],
     }),
@@ -141,7 +139,20 @@ export async function callCopilotDirect(prompt: string, images?: string[]): Prom
 }
 
 /** Call the best available direct provider: Claude > Copilot */
-export async function callDirect(prompt: string, images?: string[]): Promise<string> {
-  if (isClaudeConfigured()) return callClaudeDirect(prompt, images)
-  return callCopilotDirect(prompt, images)
+export async function callDirect(
+  prompt: string,
+  images?: string[],
+  systemPrompt?: string
+): Promise<string> {
+  if (isClaudeConfigured()) return callClaudeDirect(prompt, images, systemPrompt)
+  return callCopilotDirect(prompt, images, systemPrompt)
+}
+
+/** Fallback system prompt when gateway doesn't supply one */
+function defaultSystemPrompt(): string {
+  return (
+    `You are Hydra, a personal AI assistant. ` +
+    `Be direct and concise. Lead with the answer. ` +
+    `Use plain text. No filler phrases.`
+  )
 }

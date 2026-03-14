@@ -13,6 +13,8 @@ export interface Channel {
   sendAndGetId(message: OutboundMessage): Promise<string>;
   // Edit an already-sent message in-place
   editMessage(threadId: string, messageId: string, text: string): Promise<void>;
+  // Delete a message (optional — not all channels support it)
+  deleteMessage?(threadId: string, messageId: string): Promise<void>;
   sendTyping(threadId: string): Promise<void>;
   onMessage(handler: MessageHandler): void;
   onEvent(handler: EventHandler): void;
@@ -37,6 +39,9 @@ export abstract class BaseChannel implements Channel {
 
   // Default: no-op (channels override to support live editing)
   async editMessage(_threadId: string, _messageId: string, _text: string): Promise<void> {}
+
+  // Default: no-op (channels override to support deletion)
+  async deleteMessage?(_threadId: string, _messageId: string): Promise<void> {}
 
   onMessage(handler: MessageHandler): void { this.messageHandlers.push(handler); }
   onEvent(handler: EventHandler): void { this.eventHandlers.push(handler); }

@@ -1,32 +1,32 @@
 // The Hydra Gateway — central orchestrator.
-// Phase 4A: vision via images[] on InboundMessage
-// Phase 4B: streaming replies via editMessage
-// Phase 5A: pairing/security codes for unknown senders
-// Phase 6A: Anthropic OAuth (/opencode-login) + GitHub Copilot (/copilot-login)
-// Phase 6B: intent routing (code/chat/vision/computer)
-// Phase 7: computer-use via @hydra/computer-use
-// Phase 9: cross-channel session continuity (/link, /handoff)
-// Phase 10: GitHub PR worktrees (/diff, /rollback, auto PR#N detection)
+// Features: vision, streaming, pairing, OAuth, Copilot, model routing,
+//           computer-use, cross-channel sessions, PR worktrees,
+//           structured system prompt, bootstrap workspace files, message envelope,
+//           NO_REPLY/HEARTBEAT_OK protocol, emoji reactions, heartbeat proactive loop,
+//           inbound debounce, better streaming, memory search, owner ID hashing.
 
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { ChannelRegistry, type InboundMessage, type ChannelEvent } from '@hydra/core'
-import { SessionManager } from './session-manager.js'
+import { SessionManager, buildSessionKey } from './session-manager.js'
 import { runSession } from './opencode-session.js'
 import { stopServer } from './opencode-server.js'
 import { Scheduler, type ScheduledTask } from './scheduler.js'
-import { buildMemoryPrompt, appendMemory, writeMemory } from './memory.js'
+import { buildMemoryPrompt, appendMemory, writeMemory, searchMemory, buildEnvelope, getCurrentTime, readMemory } from './memory.js'
 import { createLogger } from './logger.js'
 import { isAllowed, upsertPairingRequest, approvePairing, revokePairing, listPendingRequests } from './pairing.js'
 import { classifyIntent, stripIntentPrefix } from './router.js'
 import { isCopilotConfigured, isClaudeConfigured, getValidClaudeToken, githubCopilotLogin, resolveCopilotCredentials, getVisionUsageStatus } from './copilot-chat.js'
 import { buildAuthUrl, exchangeCode, saveResult, saveApiKey, type PendingOAuth } from './auth/anthropic-oauth.js'
 import { createFromPR, getWorktreeDiff, rollbackWorktree } from './worktree-manager.js'
+import { buildSystemPrompt, NO_REPLY, HEARTBEAT_OK } from './system-prompt.js'
+import { ensureWorkspaceFiles, readWorkspaceFiles } from './workspace.js'
+import { HeartbeatManager, HEARTBEAT_PROMPT } from './heartbeat.js'
 
 const log = createLogger('gateway')
 
-/** True if opencode auth.json has any anthropic credentials (API key or OAuth tokens) */
+/** True if opencode auth.json has any anthropic credentials */
 function hasOpencodeAuth(): boolean {
   try {
     const data = JSON.parse(fs.readFileSync(
@@ -49,6 +49,7 @@ export type GatewayConfig = {
 
 const CMD_REMEMBER   = /^\/remember\s+(.+)/i
 const CMD_FORGET     = /^\/forget$/i
+const CMD_SEARCH     = /^\/search\s+(.+)/i
 const CMD_SCHEDULE   = /^\/schedule\s+(.+)/i
 const CMD_UNSCHEDULE = /^\/unschedule\s+(\S+)/i
 const CMD_TASKS      = /^\/tasks$/i
@@ -68,7 +69,7 @@ const CMD_DIFF       = /^\/diff$/i
 const CMD_ROLLBACK   = /^\/rollback$/i
 const PR_PATTERN     = /\bpr\s*#(\d+)/i
 const CMD_LOGIN      = /^\/opencode-login$/i
-const CMD_CODE       = /^\/opencode-code\s+(\S+)/i
+const CMD_OAUTH_CODE = /^\/opencode-code\s+(\S+)/i
 
 const NO_CREDS_MSG = [
   'No AI credentials configured.',
@@ -86,6 +87,12 @@ export class Gateway {
   private activeRuns = new Map<string, AbortController>()
   private scheduler: Scheduler
   private pendingOAuth = new Map<string, PendingOAuth>()
+  private heartbeat: HeartbeatManager
+  // Feature 7: inbound debounce — batch rapid messages from same sender
+  private debounceMap = new Map<string, { timer: ReturnType<typeof setTimeout>; messages: InboundMessage[] }>()
+  private readonly DEBOUNCE_MS = 600
+  // Feature 3: track last message time per thread for envelope elapsed time
+  private lastMessageAt = new Map<string, Date>()
 
   constructor(registry: ChannelRegistry, config: GatewayConfig) {
     this.registry = registry
@@ -95,6 +102,7 @@ export class Gateway {
       worktreesEnabled: config.worktrees ?? false,
     })
     this.scheduler = new Scheduler(this.fireScheduledTask.bind(this))
+    this.heartbeat = new HeartbeatManager(this.fireHeartbeat.bind(this))
   }
 
   async start(): Promise<void> {
@@ -103,6 +111,7 @@ export class Gateway {
     this.registry.onEvent(this.handleEvent.bind(this))
     await this.registry.startAll()
     this.scheduler.start()
+    this.heartbeat.start()
     const idleMs = this.config.sessionIdleMs ?? 30 * 60 * 1000
     this.sweepTimer = setInterval(() => this.sessions.sweepIdle(idleMs), 5 * 60 * 1000)
     log.info(`Gateway running — channels: [${this.registry.getAll().map((c) => c.id).join(', ')}]`)
@@ -112,6 +121,7 @@ export class Gateway {
     log.info('Stopping Hydra gateway...')
     if (this.sweepTimer) clearInterval(this.sweepTimer)
     this.scheduler.stop()
+    this.heartbeat.stop()
     for (const [, ctrl] of this.activeRuns) ctrl.abort()
     await this.registry.stopAll()
     await stopServer()
@@ -123,7 +133,51 @@ export class Gateway {
     return owners.some((o) => o === `${channelId}:${senderId}` || o === senderId)
   }
 
+  private getOwnerIds(): string[] {
+    return (process.env.HYDRA_OWNER_IDS ?? '').split(',')
+      .map((s) => {
+        const parts = s.trim().split(':')
+        return parts[parts.length - 1]
+      })
+      .filter(Boolean)
+  }
+
+  // ── Feature 7: Inbound debounce ──────────────────────────────────────────────
   private async handleMessage(message: InboundMessage): Promise<void> {
+    const text = message.text.trim()
+
+    // Commands bypass debounce — process immediately
+    if (text.startsWith('/')) {
+      return this.processMessage(message)
+    }
+
+    const key = `${message.channelId}:${message.senderId}`
+    const existing = this.debounceMap.get(key)
+    if (existing) {
+      clearTimeout(existing.timer)
+      existing.messages.push(message)
+    } else {
+      this.debounceMap.set(key, { messages: [message], timer: 0 as any })
+    }
+
+    const entry = this.debounceMap.get(key)!
+    entry.timer = setTimeout(() => {
+      this.debounceMap.delete(key)
+      const combined = entry.messages
+      if (combined.length === 1) {
+        this.processMessage(combined[0]).catch((e) => log.error('processMessage error:', e))
+      } else {
+        const merged: InboundMessage = {
+          ...combined[combined.length - 1],
+          text: combined.map((m) => m.text).filter(Boolean).join('\n'),
+          images: combined.flatMap((m) => m.images ?? []),
+        }
+        this.processMessage(merged).catch((e) => log.error('processMessage error:', e))
+      }
+    }, this.DEBOUNCE_MS)
+  }
+
+  private async processMessage(message: InboundMessage): Promise<void> {
     const channel = this.registry.get(message.channelId)
     if (!channel) return
     const text = message.text.trim()
@@ -142,6 +196,9 @@ export class Gateway {
       }
     }
 
+    // Feature 5: 👀 reaction — message received and will be processed
+    await message.setReaction?.('👀').catch(() => {})
+
     // ── Built-in commands ─────────────────────────────────────────────────────
     if (CMD_HELP.test(text)) {
       await channel.send({
@@ -150,6 +207,7 @@ export class Gateway {
           'Hydra commands:',
           '/remember <note> — save to memory',
           '/forget — clear memory for this thread',
+          '/search <query> — search memory',
           '/schedule <cron|ISO> <prompt> — schedule a task',
           '/unschedule <id> — remove scheduled task',
           '/tasks — list scheduled tasks',
@@ -158,7 +216,7 @@ export class Gateway {
           '/pending [channelId] — list pending pairing requests',
           '/opencode-login — connect Claude account via OAuth (owner only)',
           '/opencode-code <code> — complete Claude OAuth login',
-          '/claude-key <sk-ant-...> — set Anthropic API key directly (owner only)',
+          '/claude-key <sk-ant-...> — set Anthropic API key (owner only)',
           '/claude-status — check auth status',
           '/copilot-login — connect GitHub Copilot',
           '/copilot-status — check Copilot auth status',
@@ -181,6 +239,13 @@ export class Gateway {
     if (CMD_FORGET.test(text)) {
       writeMemory(message.channelId, message.threadId, '')
       await channel.send({ threadId: message.threadId, text: 'Memory cleared.' })
+      return
+    }
+
+    const searchMatch = CMD_SEARCH.exec(text)
+    if (searchMatch) {
+      const results = searchMemory(message.channelId, searchMatch[1])
+      await channel.send({ threadId: message.threadId, text: results })
       return
     }
 
@@ -280,8 +345,8 @@ export class Gateway {
       return
     }
 
-    const codeMatch = CMD_CODE.exec(text)
-    if (codeMatch) {
+    const oauthCodeMatch = CMD_OAUTH_CODE.exec(text)
+    if (oauthCodeMatch) {
       if (!this.isOwner(message.channelId, message.senderId)) {
         await channel.send({ threadId: message.threadId, text: 'Only the bot owner can run this command.' })
         return
@@ -299,7 +364,7 @@ export class Gateway {
       }
       await channel.send({ threadId: message.threadId, text: 'Exchanging code...' })
       try {
-        const result = await exchangeCode(codeMatch[1], pending.verifier)
+        const result = await exchangeCode(oauthCodeMatch[1], pending.verifier)
         this.pendingOAuth.delete(oauthKey)
         saveResult(result)
         if (result.type === 'api_key') {
@@ -493,7 +558,6 @@ export class Gateway {
     const channel = this.registry.get(message.channelId)
     if (!channel) return
 
-    // Guard: no credentials at all
     if (!hasAnyCredentials()) {
       await channel.send({ threadId: message.threadId, text: NO_CREDS_MSG })
       return
@@ -503,6 +567,23 @@ export class Gateway {
     const { key } = session
 
     await this.sessions.ensureWorktree(session)
+
+    // Feature 2: ensure bootstrap workspace files exist
+    ensureWorkspaceFiles(session.workdir, {
+      channelId: message.channelId,
+      senderId: message.senderId,
+      senderName: message.senderName,
+      location: process.env.HYDRA_USER_LOCATION,
+      timezone: process.env.HYDRA_USER_TIMEZONE,
+    })
+
+    // Feature 6: register heartbeat target on first active message
+    this.heartbeat.register({
+      channelId: message.channelId,
+      threadId: message.threadId,
+      senderId: message.senderId,
+      workdir: session.workdir,
+    })
 
     const existing = this.activeRuns.get(key)
     if (existing) { log.debug(`[${key}] Aborting previous run`); existing.abort() }
@@ -514,27 +595,62 @@ export class Gateway {
     const intent = classifyIntent(rawPrompt, !!(message.images?.length))
     const prompt = stripIntentPrefix(rawPrompt)
 
-    // For OpenCode-routed queries, inject tool-use hint so Claude fetches live data
+    // Feature 3: message envelope with elapsed time
+    const threadKey = `${message.channelId}:${message.threadId}`
+    const lastAt = this.lastMessageAt.get(threadKey)
+    const envelope = buildEnvelope(message.channelId, message.senderName, message.timestamp, lastAt)
+    this.lastMessageAt.set(threadKey, message.timestamp)
+
     const goesToOpenCode = !(intent === 'fast' || (intent === 'chat' && (isClaudeConfigured() || isCopilotConfigured())))
-    const contextPrefix = buildMemoryPrompt(message.channelId, message.threadId, goesToOpenCode)
-    const fullPrompt = `${contextPrefix}${prompt}`
+    const memory = readMemory(message.channelId, message.threadId)
+
+    // Feature 1: structured system prompt with feature 10 owner ID hashing
+    const promptMode = intent === 'computer' ? 'computer' : (goesToOpenCode ? 'code' : 'chat')
+    const systemPrompt = buildSystemPrompt({
+      mode: promptMode,
+      channelId: message.channelId,
+      senderId: message.senderId,
+      senderName: message.senderName,
+      ownerIds: this.getOwnerIds(),
+      bootstrapFiles: readWorkspaceFiles(session.workdir),
+      memory,
+      location: process.env.HYDRA_USER_LOCATION,
+      timezone: process.env.HYDRA_USER_TIMEZONE,
+      currentTime: getCurrentTime(process.env.HYDRA_USER_TIMEZONE),
+      includeToolHint: goesToOpenCode,
+    })
+
+    // For OpenCode, build context prefix (injected into prompt body, not system prompt)
+    const contextPrefix = goesToOpenCode
+      ? buildMemoryPrompt(message.channelId, message.threadId, true)
+      : ''
+
+    const fullPrompt = `${envelope}\n${contextPrefix}${prompt}`
 
     log.info(`[${key}] intent=${intent} route=${goesToOpenCode ? 'opencode' : 'direct'} "${prompt.slice(0, 100)}"`)
 
+    // Feature 5: 🤔 reaction — processing started
+    await message.setReaction?.('🤔').catch(() => {})
+
+    let reactionSet = false
     try {
-      // ── Computer-use (Phase 7) ────────────────────────────────────────────
+      // ── Computer-use ──────────────────────────────────────────────────────
       if (intent === 'computer') {
         await this.runComputerTask(message, fullPrompt, channel)
+        await message.setReaction?.('👍').catch(() => {})
+        reactionSet = true
         return
       }
 
       // ── Direct chat via Claude API key or Copilot ─────────────────────────
       if (!goesToOpenCode) {
-        await this.runDirectChat(message, fullPrompt, message.images, channel)
+        await this.runDirectChat(message, fullPrompt, message.images, channel, systemPrompt)
+        await message.setReaction?.('👍').catch(() => {})
+        reactionSet = true
         return
       }
 
-      // ── OpenCode session (code / vision / chat fallback with oauth tokens) ─
+      // ── OpenCode session ───────────────────────────────────────────────────
       await channel.sendTyping(message.threadId)
 
       const placeholderId = await channel.sendAndGetId({
@@ -564,6 +680,15 @@ export class Gateway {
       session.opencodeSessionId = result.sessionId
 
       const finalText = (result.text || accumulated) + (result.error ? `\n\n⚠️ ${result.error}` : '')
+
+      // Feature 4: suppress NO_REPLY and HEARTBEAT_OK silently
+      if (finalText.trim() === NO_REPLY || finalText.trim() === HEARTBEAT_OK) {
+        if (placeholderId) await channel.deleteMessage?.(message.threadId, placeholderId)
+        await message.setReaction?.('👍').catch(() => {})
+        reactionSet = true
+        return
+      }
+
       if (placeholderId && finalText.trim()) {
         await channel.editMessage(message.threadId, placeholderId, finalText).catch(() => {})
       } else if (finalText.trim()) {
@@ -576,9 +701,14 @@ export class Gateway {
         await channel.send({ threadId: message.threadId, text: '(context compacted to stay within limits)' })
       }
 
+      await message.setReaction?.('👍').catch(() => {})
+      reactionSet = true
+
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') return
       log.error(`[${key}] Error:`, err)
+      await message.setReaction?.('👎').catch(() => {})
+      reactionSet = true
       await channel.send({ threadId: message.threadId, text: 'Something went wrong. Please try again.', replyToId: message.id }).catch(() => {})
     } finally {
       this.activeRuns.delete(key)
@@ -589,12 +719,20 @@ export class Gateway {
     message: InboundMessage,
     prompt: string,
     images: string[] | undefined,
-    channel: any
+    channel: any,
+    systemPrompt?: string
   ): Promise<void> {
     const placeholderId = await channel.sendAndGetId({ threadId: message.threadId, text: '⏳' })
     try {
       const { callDirect } = await import('./copilot-chat.js')
-      const text = await callDirect(prompt, images)
+      const text = await callDirect(prompt, images, systemPrompt)
+
+      // Feature 4: suppress NO_REPLY and HEARTBEAT_OK
+      if (text.trim() === NO_REPLY || text.trim() === HEARTBEAT_OK) {
+        await channel.deleteMessage?.(message.threadId, placeholderId)
+        return
+      }
+
       await channel.editMessage(message.threadId, placeholderId, text).catch(() => {
         channel.send({ threadId: message.threadId, text })
       })
@@ -622,6 +760,60 @@ export class Gateway {
       })
     } catch (e) {
       await channel.editMessage(message.threadId, placeholderId, `Computer task error: ${e}`).catch(() => {})
+    }
+  }
+
+  // ── Feature 6: Heartbeat callback ─────────────────────────────────────────
+  private async fireHeartbeat(
+    target: { channelId: string; threadId: string; senderId: string; workdir: string },
+    _sendResponse: (text: string) => Promise<void>
+  ): Promise<void> {
+    const channel = this.registry.get(target.channelId as any)
+    if (!channel || !hasAnyCredentials()) return
+
+    log.info(`Firing heartbeat for ${target.channelId}:${target.threadId}`)
+
+    const session = this.sessions.get(buildSessionKey(target.channelId, target.threadId))
+    if (!session) return // no active session — skip
+
+    const memory = readMemory(target.channelId, target.threadId)
+    const systemPrompt = buildSystemPrompt({
+      mode: 'chat',
+      channelId: target.channelId,
+      senderId: target.senderId,
+      ownerIds: this.getOwnerIds(),
+      bootstrapFiles: readWorkspaceFiles(target.workdir),
+      memory,
+      location: process.env.HYDRA_USER_LOCATION,
+      timezone: process.env.HYDRA_USER_TIMEZONE,
+      currentTime: getCurrentTime(process.env.HYDRA_USER_TIMEZONE),
+    })
+
+    try {
+      const goesToOpenCode = !isClaudeConfigured() && !isCopilotConfigured()
+      let response: string
+
+      if (goesToOpenCode && session.opencodeSessionId) {
+        const result = await runSession({
+          sessionId: session.opencodeSessionId,
+          directory: target.workdir,
+          prompt: HEARTBEAT_PROMPT,
+        })
+        response = result.text
+      } else {
+        const { callDirect } = await import('./copilot-chat.js')
+        response = await callDirect(HEARTBEAT_PROMPT, undefined, systemPrompt)
+      }
+
+      const trimmed = response.trim()
+      if (trimmed === HEARTBEAT_OK || trimmed === NO_REPLY || !trimmed) {
+        log.debug(`Heartbeat suppressed for ${target.channelId}:${target.threadId}`)
+        return
+      }
+
+      await channel.send({ threadId: target.threadId, text: response })
+    } catch (e) {
+      log.warn(`Heartbeat failed: ${e}`)
     }
   }
 
@@ -659,6 +851,7 @@ export class Gateway {
       const session = this.sessions.getOrCreate(message)
       session.worktree = result
       session.workdir = result.directory
+      this.heartbeat.updateWorkdir(message.channelId, message.threadId, result.directory)
       await channel.editMessage(message.threadId, placeholderId,
         `PR #${prNumber} checked out!\nBranch: ${result.branch}\nWorkdir: ${result.directory}\n\nNow send your instructions.`
       ).catch(() => {})
@@ -670,7 +863,7 @@ export class Gateway {
   private async fireScheduledTask(task: ScheduledTask): Promise<void> {
     const channel = this.registry.get(task.channelId as any)
     if (!channel) { log.warn(`Scheduled task ${task.id}: channel ${task.channelId} not found`); return }
-    const syntheticMessage = {
+    const syntheticMessage: InboundMessage = {
       id: `scheduled_${task.id}_${Date.now()}`, channelId: task.channelId as any,
       threadId: task.threadId, senderId: 'scheduler', text: task.prompt, timestamp: new Date(),
     }

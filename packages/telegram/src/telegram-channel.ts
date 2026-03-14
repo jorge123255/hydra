@@ -52,10 +52,13 @@ export class TelegramChannel extends BaseChannel {
         if (b64) images.push(`data:${ctx.message.document.mime_type};base64,${b64}`);
       }
 
+      const chatId = ctx.chat.id;
+      const msgId = ctx.message.message_id;
+
       const inbound: InboundMessage = {
-        id: String(ctx.message.message_id),
+        id: String(msgId),
         channelId: this.id,
-        threadId: String(ctx.chat.id),
+        threadId: String(chatId),
         senderId: String(ctx.from?.id ?? "unknown"),
         senderName: ctx.from?.username ?? ctx.from?.first_name,
         text,
@@ -66,6 +69,16 @@ export class TelegramChannel extends BaseChannel {
         timestamp: new Date(ctx.message.date * 1000),
         raw: ctx.message,
         attachments: this.extractAttachments(ctx.message),
+        // Feature 5: reaction callback
+        setReaction: async (emoji: string) => {
+          try {
+            await (this.bot.api as any).setMessageReaction(chatId, msgId, [
+              { type: "emoji", emoji },
+            ]);
+          } catch {
+            // ignore — reaction may not be supported or emoji may be invalid
+          }
+        },
       };
       await this.emitMessage(inbound);
     });
@@ -99,7 +112,6 @@ export class TelegramChannel extends BaseChannel {
 
   async sendAndGetId(message: OutboundMessage): Promise<string> {
     const chatId = Number(message.threadId);
-    // If editMessageId is set, edit in place
     if (message.editMessageId) {
       await this.editMessage(message.threadId, message.editMessageId, message.text);
       return message.editMessageId;
@@ -121,12 +133,17 @@ export class TelegramChannel extends BaseChannel {
     const chatId = Number(threadId);
     const msgId = Number(messageId);
     if (!chatId || !msgId) return;
-    // Telegram edit has same 4096 char limit — truncate if needed
     const truncated = text.length > TELEGRAM_MAX_MESSAGE_LENGTH
       ? text.slice(0, TELEGRAM_MAX_MESSAGE_LENGTH - 3) + "..."
       : text;
-    await this.bot.api.editMessageText(chatId, msgId, truncated)
-      .catch(() => {}); // ignore "message not modified" errors
+    await this.bot.api.editMessageText(chatId, msgId, truncated).catch(() => {});
+  }
+
+  async deleteMessage(threadId: string, messageId: string): Promise<void> {
+    const chatId = Number(threadId);
+    const msgId = Number(messageId);
+    if (!chatId || !msgId) return;
+    await this.bot.api.deleteMessage(chatId, msgId).catch(() => {});
   }
 
   async sendTyping(threadId: string): Promise<void> {

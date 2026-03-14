@@ -2,6 +2,7 @@
 // Includes OpenClaw's proactive compaction fix + auth key rotation.
 // Phase 4A: vision via FilePartInput (images as data URLs)
 // Phase 4B: onChunk wired to event stream for streaming replies
+// Feature 8: min 30 chars before first edit to avoid flickering
 
 import type { PermissionRuleset, FilePartInput, TextPartInput } from '@opencode-ai/sdk/v2'
 import { getClient } from './opencode-server.js'
@@ -11,6 +12,8 @@ const log = createLogger('opencode-session')
 
 const PROACTIVE_COMPACT_THRESHOLD = 0.6
 const MAX_AUTO_COMPACTIONS = 5
+// Don't emit first streaming chunk until this many chars are ready (feature 8)
+const MIN_CHUNK_CHARS = 30
 
 const DEFAULT_PERMISSIONS: PermissionRuleset = [
   { permission: 'edit',               pattern: '**', action: 'allow' },
@@ -134,6 +137,7 @@ export async function runSession(opts: RunOptions): Promise<RunResult> {
   // message.part.updated carries the full current text of each part (streaming updates replace, not append).
   // We collect partId -> text for all parts, then at the end filter to assistant-only messageIDs.
   // For onChunk streaming we emit optimistically once we know a part belongs to an assistant message.
+  // Feature 8: don't emit first chunk until MIN_CHUNK_CHARS are ready.
   const subscribeResp = await client.event.subscribe({ directory }, { signal } as any)
 
   // messageID -> role
@@ -142,6 +146,7 @@ export async function runSession(opts: RunOptions): Promise<RunResult> {
   const allParts = new Map<string, { messageID: string; text: string }>()
   let error: string | undefined
   let lastChunkAt = 0
+  let firstChunkEmitted = false
 
   const getAssistantText = (): string => {
     const assistantPartTexts: string[] = []
@@ -157,10 +162,13 @@ export async function runSession(opts: RunOptions): Promise<RunResult> {
     if (!onChunk) return
     const text = getAssistantText()
     if (!text) return
+    // Feature 8: wait for MIN_CHUNK_CHARS before first streaming edit
+    if (!firstChunkEmitted && text.length < MIN_CHUNK_CHARS && !force) return
     const now = Date.now()
-    if (force || now - lastChunkAt > 800 || text.length > 300) {
+    if (force || now - lastChunkAt > 800) {
       await onChunk(text).catch(() => {})
       lastChunkAt = now
+      firstChunkEmitted = true
     }
   }
 
@@ -172,7 +180,6 @@ export async function runSession(opts: RunOptions): Promise<RunResult> {
         const info = event.properties?.info
         if (info?.id && (info.role === 'assistant' || info.role === 'user')) {
           messageRoles.set(info.id, info.role)
-          // If new assistant parts became available due to this role update, emit
           if (info.role === 'assistant') await maybeEmitChunk()
         }
       }
@@ -181,7 +188,6 @@ export async function runSession(opts: RunOptions): Promise<RunResult> {
         const part = event.properties?.part
         if (part?.type === 'text' && typeof part.text === 'string' && part.text && part.id) {
           const msgId: string = (part as any).messageID ?? ''
-          // Replace with latest full text of this part
           allParts.set(part.id, { messageID: msgId, text: part.text })
           if (messageRoles.get(msgId) === 'assistant') {
             await maybeEmitChunk()
