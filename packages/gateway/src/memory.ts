@@ -1,6 +1,6 @@
 // Per-session memory — inspired by OpenClaw's MEMORY.md pattern.
 // Each channel:thread gets a persistent markdown file the agent can read.
-// Injected into session system prompt so the agent "remembers" context.
+// Injected into session prompt so the agent "remembers" context.
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -47,9 +47,45 @@ export function appendMemory(channelId: string, threadId: string, entry: string)
   writeMemory(channelId, threadId, updated)
 }
 
-// Build a system prompt prefix with memory context
-export function buildMemoryPrompt(channelId: string, threadId: string): string {
+function getCurrentTime(timezone?: string): string {
+  try {
+    return new Date().toLocaleString('en-US', {
+      timeZone: timezone ?? 'America/Chicago',
+      weekday: 'short', year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
+    })
+  } catch {
+    return new Date().toISOString()
+  }
+}
+
+// Build a prompt prefix with user context + memory.
+// For OpenCode queries this also includes a tool-use hint so the agent
+// fetches real-time data (weather, news, time) instead of refusing.
+export function buildMemoryPrompt(channelId: string, threadId: string, includeToolHint = false): string {
+  const parts: string[] = []
+
+  const location = process.env.HYDRA_USER_LOCATION
+  const timezone = process.env.HYDRA_USER_TIMEZONE
+  const time = getCurrentTime(timezone)
+
+  // Context block: always injected so the model knows who/where/when
+  const contextLines: string[] = [`Current time: ${time}`]
+  if (location) contextLines.push(`User location: ${location}`)
+  parts.push(`[Context: ${contextLines.join(' | ')}]`)
+
+  // Tool hint: tell OpenCode to actually USE bash for real-time data
+  if (includeToolHint && location) {
+    const city = location.split(',')[0].trim()
+    parts.push(
+      `[You have full bash/tool access. For real-time data, fetch it — don't say you can't. ` +
+      `Weather: run \`curl -s "wttr.in/${encodeURIComponent(city)}?format=3"\`. ` +
+      `For time-sensitive info, use bash/webfetch rather than your training data.]`
+    )
+  }
+
   const memory = readMemory(channelId, threadId)
-  if (!memory) return ''
-  return `<memory>\n${memory}\n</memory>\n\n`
+  if (memory) parts.push(`<memory>\n${memory}\n</memory>`)
+
+  return parts.join('\n') + '\n\n'
 }

@@ -71,7 +71,7 @@ const CMD_LOGIN      = /^\/opencode-login$/i
 const CMD_CODE       = /^\/opencode-code\s+(\S+)/i
 
 const NO_CREDS_MSG = [
-  '🔑 No AI credentials configured.',
+  'No AI credentials configured.',
   '',
   'To get started:',
   '• Run /opencode-login to connect your Claude account (recommended)',
@@ -513,10 +513,13 @@ export class Gateway {
     const rawPrompt = overridePrompt ?? message.text
     const intent = classifyIntent(rawPrompt, !!(message.images?.length))
     const prompt = stripIntentPrefix(rawPrompt)
-    const memoryPrefix = buildMemoryPrompt(message.channelId, message.threadId)
-    const fullPrompt = memoryPrefix ? `${memoryPrefix}${prompt}` : prompt
 
-    log.info(`[${key}] intent=${intent} "${prompt.slice(0, 100)}"`)
+    // For OpenCode-routed queries, inject tool-use hint so Claude fetches live data
+    const goesToOpenCode = !(intent === 'fast' || (intent === 'chat' && (isClaudeConfigured() || isCopilotConfigured())))
+    const contextPrefix = buildMemoryPrompt(message.channelId, message.threadId, goesToOpenCode)
+    const fullPrompt = `${contextPrefix}${prompt}`
+
+    log.info(`[${key}] intent=${intent} route=${goesToOpenCode ? 'opencode' : 'direct'} "${prompt.slice(0, 100)}"`)
 
     try {
       // ── Computer-use (Phase 7) ────────────────────────────────────────────
@@ -526,7 +529,7 @@ export class Gateway {
       }
 
       // ── Direct chat via Claude API key or Copilot ─────────────────────────
-      if (intent === 'fast' || (intent === 'chat' && (isClaudeConfigured() || isCopilotConfigured()))) {
+      if (!goesToOpenCode) {
         await this.runDirectChat(message, fullPrompt, message.images, channel)
         return
       }
@@ -536,7 +539,7 @@ export class Gateway {
 
       const placeholderId = await channel.sendAndGetId({
         threadId: message.threadId,
-        text: '⏳ _thinking..._',
+        text: '⏳',
       })
 
       let accumulated = ''
@@ -566,11 +569,11 @@ export class Gateway {
       } else if (finalText.trim()) {
         await channel.send({ threadId: message.threadId, text: finalText })
       } else {
-        await channel.editMessage(message.threadId, placeholderId, '_(no response)_').catch(() => {})
+        await channel.editMessage(message.threadId, placeholderId, '(no response)').catch(() => {})
       }
 
       if (result.compacted) {
-        await channel.send({ threadId: message.threadId, text: '_(context compacted to stay within limits)_' })
+        await channel.send({ threadId: message.threadId, text: '(context compacted to stay within limits)' })
       }
 
     } catch (err) {
@@ -588,7 +591,7 @@ export class Gateway {
     images: string[] | undefined,
     channel: any
   ): Promise<void> {
-    const placeholderId = await channel.sendAndGetId({ threadId: message.threadId, text: '⏳ _thinking..._' })
+    const placeholderId = await channel.sendAndGetId({ threadId: message.threadId, text: '⏳' })
     try {
       const { callDirect } = await import('./copilot-chat.js')
       const text = await callDirect(prompt, images)
@@ -602,7 +605,7 @@ export class Gateway {
   }
 
   private async runComputerTask(message: InboundMessage, prompt: string, channel: any): Promise<void> {
-    const placeholderId = await channel.sendAndGetId({ threadId: message.threadId, text: '🖥️ _starting computer task..._' })
+    const placeholderId = await channel.sendAndGetId({ threadId: message.threadId, text: '🖥️ starting computer task...' })
     try {
       const { runComputerTask } = await import('@hydra/computer-use')
       const result = await runComputerTask({
@@ -613,7 +616,7 @@ export class Gateway {
         },
       })
       const summary = result.success ? `Done!\n${result.output}` : `Failed: ${result.output}`
-      const stats = `\n_(${result.iterations} steps, ${result.visionCallsUsed} vision calls)_`
+      const stats = `\n(${result.iterations} steps, ${result.visionCallsUsed} vision calls)`
       await channel.editMessage(message.threadId, placeholderId, summary + stats).catch(() => {
         channel.send({ threadId: message.threadId, text: summary + stats })
       })
@@ -646,7 +649,7 @@ export class Gateway {
   private async handlePRCheckout(message: InboundMessage, prNumber: number): Promise<void> {
     const channel = this.registry.get(message.channelId)
     if (!channel) return
-    const placeholderId = await channel.sendAndGetId({ threadId: message.threadId, text: `⏳ _Checking out PR #${prNumber}..._` })
+    const placeholderId = await channel.sendAndGetId({ threadId: message.threadId, text: `⏳ Checking out PR #${prNumber}...` })
     try {
       const result = await createFromPR({ baseDirectory: this.config.workdir, prNumber })
       if (result instanceof Error) {
