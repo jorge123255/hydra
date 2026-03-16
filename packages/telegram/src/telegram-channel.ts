@@ -121,8 +121,13 @@ export class TelegramChannel extends BaseChannel {
       { command: "diff",          description: "Show git diff of current worktree" },
       { command: "rollback",      description: "Git stash pop in current worktree" },
       { command: "vision_usage",  description: "Check vision budget usage" },
-      { command: "approve",       description: "Approve a pairing request" },
-      { command: "pending",       description: "List pending pairing requests" },
+      { command: "approve",        description: "Approve a pairing request" },
+      { command: "pending",        description: "List pending pairing requests" },
+      { command: "chatgpt_login",  description: "Add a ChatGPT account to the pool" },
+      { command: "chatgpt_accounts", description: "List all ChatGPT pool accounts" },
+      { command: "chatgpt_status", description: "ChatGPT pool status" },
+      { command: "providers",      description: "Show all AI providers and routing" },
+      { command: "ollama_pull",    description: "Pull an Ollama model (e.g. nemotron-mini)" },
     ]).catch(() => {});
 
     if (this.config.webhookUrl) {
