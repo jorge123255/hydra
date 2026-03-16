@@ -158,12 +158,13 @@ export function isClaudeConfigured(): boolean {
 export async function callClaudeDirect(
   prompt: string,
   images?: string[],
-  systemPrompt?: string
+  systemPrompt?: string,
+  modelOverride?: string,
 ): Promise<string> {
   const auth = await resolveAnthropicAuth()
   if (!auth) throw new Error('No Anthropic credentials — set ANTHROPIC_API_KEY or log in via Claude Code')
 
-  const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'
+  const model = modelOverride ?? process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'
 
   type ImageBlock = { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
   type TextBlock  = { type: 'text'; text: string }
