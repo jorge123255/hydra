@@ -1,6 +1,12 @@
 // Direct AI chat — without OpenCode overhead.
-// Priority: 1) ANTHROPIC_API_KEY (API key or OAuth) 2) Claude Code keychain OAuth
-//           3) OpenCode auth.json OAuth (with auto-refresh) 4) GitHub Copilot 5) throw
+//
+// Provider priority (cost-aware):
+//   chat/fast  → Ollama local (free, private, instant)
+//   vision     → Claude OAuth / Copilot (only options with vision)
+//   fallback   → Claude OAuth → Codex → Copilot → error
+//
+// Set OLLAMA_HOST=http://192.168.1.x:11434 for remote Ollama.
+// Set HYDRA_OLLAMA_MODEL=nemotron-mini (default) for chat model.
 
 export { isCodexConfigured, callCodexDirect, startCodexLogin } from './auth/chatgpt-codex.js'
 
@@ -12,29 +18,46 @@ export {
 } from './auth/github-copilot.js'
 
 export { isClaudeOAuthAvailable, getValidClaudeToken } from './auth/claude-keychain.js'
+export {
+  isCodexPoolConfigured,
+  listPoolAccounts,
+  callCodexPool,
+  callCodexParallel,
+  startCodexPoolLogin,
+  addAccountToPool,
+  removeAccountFromPool,
+} from './auth/codex-pool.js'
+export {
+  isOllamaConfigured,
+  isOllamaAvailable,
+  listOllamaModels,
+  callOllama,
+  getOllamaModel,
+  getOllamaBaseUrl,
+  refreshOllamaCache,
+} from './auth/ollama.js'
 
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { resolveCopilotCredentials } from './auth/github-copilot.js'
 import { getValidClaudeToken } from './auth/claude-keychain.js'
+import { isOllamaAvailable, callOllama } from './auth/ollama.js'
+import { isCodexPoolConfigured, callCodexPool } from './auth/codex-pool.js'
 import { getVisionUsage } from '@hydra/computer-use'
 import { createLogger } from './logger.js'
 
 const log = createLogger('claude-auth')
 
 const OPENCODE_AUTH_FILE = path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json')
-// Anthropic OAuth token endpoint (same one OpenCode/pi-ai use)
 const ANTHROPIC_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token'
 const ANTHROPIC_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
-// Extra headers required for OAuth-issued access tokens (sk-ant-oat01-)
 const OAUTH_BETA_HEADERS = 'claude-code-20250219,oauth-2025-04-20'
 
 type AnthropicAuth = { token: string; isOAuth: boolean }
 
 let _openCodeCache: { auth: AnthropicAuth; cachedAt: number } | null = null
 
-/** Refresh an Anthropic OAuth access token using a refresh token */
 async function refreshOpenCodeToken(
   refreshToken: string
 ): Promise<{ access: string; refresh: string; expires: number } | null> {
@@ -57,7 +80,6 @@ async function refreshOpenCodeToken(
     return {
       access: data.access_token,
       refresh: data.refresh_token ?? refreshToken,
-      // 5-minute buffer, matching pi-ai convention
       expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
     }
   } catch (e) {
@@ -66,10 +88,8 @@ async function refreshOpenCodeToken(
   }
 }
 
-/** Read OpenCode's auth.json and return a valid access token (refreshing if needed) */
 async function getOpenCodeAuth(): Promise<AnthropicAuth | null> {
   const now = Date.now()
-  // Use cache if still fresh (5 min)
   if (_openCodeCache && now - _openCodeCache.cachedAt < 5 * 60 * 1000) {
     return _openCodeCache.auth
   }
@@ -81,24 +101,17 @@ async function getOpenCodeAuth(): Promise<AnthropicAuth | null> {
     if (!ant || ant.type !== 'oauth') return null
 
     let { access, refresh, expires } = ant as {
-      access: string
-      refresh: string
-      expires: number
+      access: string; refresh: string; expires: number
     }
 
-    // Refresh if expired (60s buffer)
     if (expires - now < 60_000) {
-      if (!refresh) {
-        log.warn('OpenCode OAuth token expired and no refresh token available')
-        return null
-      }
+      if (!refresh) { log.warn('OpenCode OAuth token expired and no refresh token'); return null }
       log.info('OpenCode OAuth token expired — refreshing...')
       const refreshed = await refreshOpenCodeToken(refresh)
       if (!refreshed) return null
       access = refreshed.access
       refresh = refreshed.refresh
       expires = refreshed.expires
-      // Persist refreshed token back to auth.json so OpenCode stays in sync
       fs.writeFileSync(
         OPENCODE_AUTH_FILE,
         JSON.stringify({ anthropic: { type: 'oauth', access, refresh, expires } }, null, 2)
@@ -115,64 +128,40 @@ async function getOpenCodeAuth(): Promise<AnthropicAuth | null> {
   }
 }
 
-/**
- * Resolve the best available Anthropic auth credentials.
- * Priority: ANTHROPIC_API_KEY → Claude Code keychain → OpenCode auth.json
- */
 async function resolveAnthropicAuth(): Promise<AnthropicAuth | null> {
-  // 1. Env var (can be either sk-ant-api03- key OR sk-ant-oat01- OAuth token)
   const envKey = process.env.ANTHROPIC_API_KEY
-  if (envKey) {
-    return { token: envKey, isOAuth: envKey.startsWith('sk-ant-oat') }
-  }
-
-  // 2. Claude Code keychain OAuth (written by Claude Code GUI app)
+  if (envKey) return { token: envKey, isOAuth: envKey.startsWith('sk-ant-oat') }
   const claudeToken = getValidClaudeToken()
-  if (claudeToken) {
-    return { token: claudeToken, isOAuth: true }
-  }
-
-  // 3. OpenCode's auth.json (with auto-refresh)
+  if (claudeToken) return { token: claudeToken, isOAuth: true }
   return getOpenCodeAuth()
 }
 
-/** Current vision budget status for today */
 export function getVisionUsageStatus(): { count: number; budget: number; remaining: number } {
   return getVisionUsage()
 }
 
-/**
- * True if Claude is callable — either via ANTHROPIC_API_KEY, Claude Code OAuth,
- * or OpenCode OAuth credentials on disk.
- * Note: async check not possible here; we do a sync best-effort check.
- */
 export function isClaudeConfigured(): boolean {
   if (process.env.ANTHROPIC_API_KEY) return true
-  // Claude Code keychain sync check
   if (getValidClaudeToken()) return true
-  // OpenCode auth.json sync check
   try {
     if (!fs.existsSync(OPENCODE_AUTH_FILE)) return false
     const data = JSON.parse(fs.readFileSync(OPENCODE_AUTH_FILE, 'utf8'))
     const ant = data?.anthropic
     if (!ant || ant.type !== 'oauth') return false
-    // Token must be present (may be expired; refresh happens at call time)
     return typeof ant.access === 'string' && ant.access.length > 0
   } catch {
     return false
   }
 }
 
-/** Call Claude via Anthropic API (supports vision via base64 images) */
+/** Call Claude via Anthropic API (supports vision) */
 export async function callClaudeDirect(
   prompt: string,
   images?: string[],
   systemPrompt?: string
 ): Promise<string> {
   const auth = await resolveAnthropicAuth()
-  if (!auth) {
-    throw new Error('No Anthropic credentials available — set ANTHROPIC_API_KEY or log in via Claude Code')
-  }
+  if (!auth) throw new Error('No Anthropic credentials — set ANTHROPIC_API_KEY or log in via Claude Code')
 
   const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'
 
@@ -184,17 +173,12 @@ export async function callClaudeDirect(
     for (const dataUrl of images) {
       const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/)
       if (match) {
-        content.push({
-          type: 'image',
-          source: { type: 'base64', media_type: match[1], data: match[2] },
-        })
+        content.push({ type: 'image', source: { type: 'base64', media_type: match[1], data: match[2] } })
       }
     }
   }
   content.push({ type: 'text', text: prompt })
 
-  // Build headers — OAuth tokens need Bearer auth + beta flags;
-  // regular API keys use x-api-key as normal.
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'anthropic-version': '2023-06-01',
@@ -228,10 +212,7 @@ export async function callClaudeDirect(
 
   if (!res.ok) {
     const body = await res.text().catch(() => '')
-    // If token expired mid-session, clear cache so next call refreshes
-    if (res.status === 401) {
-      _openCodeCache = null
-    }
+    if (res.status === 401) _openCodeCache = null
     throw new Error(`Anthropic API error ${res.status}: ${body.slice(0, 300)}`)
   }
 
@@ -239,7 +220,7 @@ export async function callClaudeDirect(
   return json.content?.[0]?.text ?? '[No response from Claude]'
 }
 
-/** Call Copilot directly — used as fallback or for vision when no API key */
+/** Call Copilot directly */
 export async function callCopilotDirect(
   prompt: string,
   images?: string[],
@@ -250,15 +231,10 @@ export async function callCopilotDirect(
 
   const model = process.env.HYDRA_COPILOT_MODEL ?? 'claude-sonnet-4.6'
 
-  type ContentPart =
-    | { type: 'text'; text: string }
-    | { type: 'image_url'; image_url: { url: string } }
-
+  type ContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
   const content: ContentPart[] = []
   if (images?.length) {
-    for (const dataUrl of images) {
-      content.push({ type: 'image_url', image_url: { url: dataUrl } })
-    }
+    for (const dataUrl of images) content.push({ type: 'image_url', image_url: { url: dataUrl } })
   }
   content.push({ type: 'text', text: prompt })
 
@@ -289,19 +265,48 @@ export async function callCopilotDirect(
   return json.choices?.[0]?.message?.content ?? '[No response from Copilot]'
 }
 
-/** Call the best available direct provider: Claude > Codex > Copilot */
+/**
+ * Call the best available direct provider.
+ * Cost-aware routing:
+ *   - Vision (images) → Claude or Copilot only (Ollama has no vision)
+ *   - Chat/fast → Ollama first (free, local), then cloud fallback
+ *   - Fallback chain: Claude OAuth → Codex → Copilot
+ */
 export async function callDirect(
   prompt: string,
   images?: string[],
   systemPrompt?: string
 ): Promise<string> {
+  const hasImages = !!(images?.length)
+
+  // Vision: needs a cloud provider with multimodal support
+  if (hasImages) {
+    if (isClaudeConfigured()) return callClaudeDirect(prompt, images, systemPrompt)
+    const { isCopilotConfigured: isCopilot } = await import('./auth/github-copilot.js')
+    if (isCopilot()) return callCopilotDirect(prompt, images, systemPrompt)
+    throw new Error('Vision requires Claude or Copilot — no vision-capable provider configured')
+  }
+
+  // Text chat: try Ollama first (free + local)
+  if (process.env.OLLAMA_DISABLED !== 'true') {
+    const ollamaReady = await isOllamaAvailable()
+    if (ollamaReady) {
+      log.debug('Routing to Ollama (local free model)')
+      return callOllama(prompt, systemPrompt)
+    }
+  }
+
+  // Cloud fallback chain (cost-aware: pool accounts free, then OAuth, then paid)
+  if (isCodexPoolConfigured()) {
+    log.debug('Routing to ChatGPT pool')
+    return callCodexPool(prompt, undefined, 'gpt-4o')
+  }
   if (isClaudeConfigured()) return callClaudeDirect(prompt, images, systemPrompt)
   const { isCodexConfigured, callCodexDirect } = await import('./auth/chatgpt-codex.js')
   if (isCodexConfigured()) return callCodexDirect(prompt, images, systemPrompt)
   return callCopilotDirect(prompt, images, systemPrompt)
 }
 
-/** Fallback system prompt when gateway doesn't supply one */
 function defaultSystemPrompt(): string {
   return (
     `You are Hydra, a personal AI assistant. ` +

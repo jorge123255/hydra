@@ -127,7 +127,8 @@ const CMD_ROLLBACK = /^\/rollback$/i;
 const PR_PATTERN = /\bpr\s*#(\d+)/i;
 const CMD_LOGIN = /^\/opencode-login$/i;
 const CMD_OAUTH_CODE = /^\/opencode-code\s+(\S+)/i;
-const CMD_RESTART = /^\/restart$/i;
+const CMD_PROVIDERS  = /^\/providers$/i
+const CMD_RESTART    = /^\/restart$/i
 const CMD_PING = /^\/ping$/i;
 
 const NO_CREDS_MSG = [
@@ -739,9 +740,12 @@ export class Gateway {
     if (CMD_CLAUDE_STATUS.test(text)) {
       const model = process.env.HYDRA_CLAUDE_MODEL ?? "claude-sonnet-4-6";
       if (isClaudeConfigured()) {
+        const apiKey = process.env.ANTHROPIC_API_KEY
         await channel.send({
           threadId: message.threadId,
-          text: `Claude active (API key)\nModel: ${model}\nKey: ...${process.env.ANTHROPIC_API_KEY!.slice(-6)}`,
+          text: apiKey
+            ? `Claude active (API key)\nModel: ${model}\nKey: ...${apiKey.slice(-6)}`
+            : `Claude active (OAuth via opencode)\nModel: ${model}`,
         });
       } else if (hasOpencodeAuth()) {
         await channel.send({
@@ -775,7 +779,7 @@ export class Gateway {
       const lines: string[] = [`${botName} — status`];
       if (isClaudeConfigured()) {
         lines.push(`Provider: Claude API (${model})`);
-        lines.push(`Key: ...${process.env.ANTHROPIC_API_KEY!.slice(-6)}`);
+        const key = process.env.ANTHROPIC_API_KEY; lines.push(key ? `Key: ...${key.slice(-6)}` : "Auth: OAuth (opencode)");
       } else if (isCodexConfigured()) {
         lines.push("Provider: ChatGPT OAuth");
       } else if (isCopilotConfigured()) {
@@ -838,7 +842,43 @@ export class Gateway {
       return;
     }
 
-    if (CMD_RESTART.test(text)) {
+    if (CMD_PROVIDERS.test(text)) {
+      const lines: string[] = ['Providers:']
+      // Ollama
+      const { isOllamaAvailable, listOllamaModels, getOllamaModel, getOllamaBaseUrl } = await import('./copilot-chat.js')
+      const ollamaUp = await isOllamaAvailable()
+      if (ollamaUp) {
+        const models = await listOllamaModels()
+        lines.push(`✅ Ollama (${getOllamaBaseUrl()}) — ${models.length} model(s): ${models.slice(0, 3).join(', ')}`)
+        lines.push(`   Chat/fast model: ${getOllamaModel()}`)
+      } else {
+        lines.push(`❌ Ollama — not running (brew install ollama && ollama serve)`)
+        lines.push(`   Set OLLAMA_HOST=http://host:11434 for remote`)
+      }
+      // Claude OAuth
+      if (isClaudeConfigured()) {
+        const apiKey = process.env.ANTHROPIC_API_KEY
+        lines.push(`✅ Claude — ${apiKey ? 'API key' : 'OAuth (opencode)'}`)
+      } else {
+        lines.push('❌ Claude — not configured')
+      }
+      // Codex
+      if (isCodexConfigured()) lines.push('✅ ChatGPT (Codex OAuth)')
+      else lines.push('❌ ChatGPT — not configured')
+      // Copilot
+      if (isCopilotConfigured()) lines.push('✅ GitHub Copilot')
+      else lines.push('❌ GitHub Copilot — not configured')
+      // Routing summary
+      lines.push('')
+      lines.push('Active routing:')
+      lines.push(`  chat/fast → ${ollamaUp ? 'Ollama' : isClaudeConfigured() ? 'Claude OAuth' : 'first available'}`)
+      lines.push(`  code → OpenCode (Claude OAuth)`)
+      lines.push(`  vision → ${isClaudeConfigured() ? 'Claude OAuth' : isCopilotConfigured() ? 'Copilot' : 'none'}`)
+      await channel.send({ threadId: message.threadId, text: lines.join('\n') })
+      return
+    }
+
+        if (CMD_RESTART.test(text)) {
       if (!this.isOwner(message.channelId, message.senderId)) {
         await channel.send({
           threadId: message.threadId,
@@ -1060,11 +1100,20 @@ export class Gateway {
       await channel.sendTyping(message.threadId);
       const placeholderId = await channel.sendAndGetId({
         threadId: message.threadId,
-        text: "⏳",
+        text: "⏳ working...",
       });
 
       let accumulated = "";
       let lastEditAt = 0;
+      const taskStartedAt = Date.now();
+
+      // Update placeholder every 10s so user knows it's alive
+      const taskTicker = setInterval(async () => {
+        if (!accumulated && placeholderId) {
+          const elapsed = Math.round((Date.now() - taskStartedAt) / 1000);
+          await channel.editMessage(message.threadId, placeholderId, `⏳ working... ${elapsed}s`).catch(() => {});
+        }
+      }, 10_000);
 
       const result = await runSession({
         sessionId: session.opencodeSessionId,
@@ -1084,6 +1133,7 @@ export class Gateway {
         },
       });
 
+      clearInterval(taskTicker);
       session.opencodeSessionId = result.sessionId;
 
       let finalText =

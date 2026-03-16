@@ -103,6 +103,28 @@ export class TelegramChannel extends BaseChannel {
   }
 
   async start(): Promise<void> {
+    // Register commands so "/" shows a menu in Telegram
+    await this.bot.api.setMyCommands([
+      { command: "help",          description: "Show all commands" },
+      { command: "status",        description: "Show active provider, model, memory stats" },
+      { command: "remember",      description: "Save a note to memory" },
+      { command: "forget",        description: "Clear memory for this thread" },
+      { command: "search",        description: "Search memory" },
+      { command: "schedule",      description: "Schedule a recurring task" },
+      { command: "tasks",         description: "List scheduled tasks" },
+      { command: "fast",          description: "Quick chat (skip OpenCode overhead)" },
+      { command: "code",          description: "Force code route to OpenCode" },
+      { command: "computer",      description: "Control the Mac desktop" },
+      { command: "restart",       description: "Restart the bot daemon" },
+      { command: "model",         description: "Show or switch AI model" },
+      { command: "claude_status", description: "Check Claude auth status" },
+      { command: "diff",          description: "Show git diff of current worktree" },
+      { command: "rollback",      description: "Git stash pop in current worktree" },
+      { command: "vision_usage",  description: "Check vision budget usage" },
+      { command: "approve",       description: "Approve a pairing request" },
+      { command: "pending",       description: "List pending pairing requests" },
+    ]).catch(() => {});
+
     if (this.config.webhookUrl) {
       await this.bot.api.setWebhook(this.config.webhookUrl);
     } else {
