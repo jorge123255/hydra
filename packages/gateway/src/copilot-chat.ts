@@ -275,7 +275,8 @@ export async function callCopilotDirect(
 export async function callDirect(
   prompt: string,
   images?: string[],
-  systemPrompt?: string
+  systemPrompt?: string,
+  ollamaModelOverride?: string,  // specific Ollama model for this intent
 ): Promise<string> {
   const hasImages = !!(images?.length)
 
@@ -287,19 +288,28 @@ export async function callDirect(
     throw new Error('Vision requires Claude or Copilot — no vision-capable provider configured')
   }
 
-  // Text chat: try Ollama first (free + local)
+  // If a specific Ollama model is requested for this intent, use it directly
+  if (ollamaModelOverride && process.env.OLLAMA_DISABLED !== 'true') {
+    const ollamaReady = await isOllamaAvailable()
+    if (ollamaReady) {
+      log.debug(`Routing to Ollama model: ${ollamaModelOverride}`)
+      return callOllama(prompt, systemPrompt, ollamaModelOverride)
+    }
+  }
+
+  // Text chat: try Ollama with default model
   if (process.env.OLLAMA_DISABLED !== 'true') {
     const ollamaReady = await isOllamaAvailable()
     if (ollamaReady) {
-      log.debug('Routing to Ollama (local free model)')
+      log.debug('Routing to Ollama (default model)')
       return callOllama(prompt, systemPrompt)
     }
   }
 
-  // Cloud fallback chain (cost-aware: pool accounts free, then OAuth, then paid)
+  // Fallback chain: subagent pool → Claude OAuth → Codex → Copilot
   if (isCodexPoolConfigured()) {
-    log.debug('Routing to ChatGPT pool')
-    return callSubagent(prompt, undefined)
+    log.debug('Routing to ChatGPT subagent pool')
+    return callSubagent(prompt, systemPrompt)
   }
   if (isClaudeConfigured()) return callClaudeDirect(prompt, images, systemPrompt)
   const { isCodexConfigured, callCodexDirect } = await import('./auth/chatgpt-codex.js')

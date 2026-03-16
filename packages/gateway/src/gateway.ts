@@ -29,7 +29,7 @@ import {
   revokePairing,
   listPendingRequests,
 } from "./pairing.js";
-import { classifyIntent, stripIntentPrefix } from "./router.js";
+import { classifyIntent, stripIntentPrefix, getOllamaModelForIntent } from "./router.js";
 import {
   isCopilotConfigured,
   isClaudeConfigured,
@@ -1128,6 +1128,7 @@ export class Gateway {
     const rawPrompt = overridePrompt ?? message.text;
     const intent = classifyIntent(rawPrompt, !!message.images?.length);
     const prompt = stripIntentPrefix(rawPrompt);
+    const ollamaModel = getOllamaModelForIntent(intent);
 
     const threadKey = `${message.channelId}:${message.threadId}`;
     const lastAt = this.lastMessageAt.get(threadKey);
@@ -1192,7 +1193,7 @@ export class Gateway {
     const fullPrompt = `${envelope}\n${contextPrefix}${webContext}${historyPrompt}`;
 
     log.info(
-      `[${key}] intent=${intent} route=${goesToOpenCode ? "opencode" : "direct"} "${prompt.slice(0, 100)}"`,
+      `[${key}] intent=${intent} route=${goesToOpenCode ? "opencode" : ollamaModel ? `ollama:${ollamaModel}` : "direct"} "${prompt.slice(0, 100)}"`,
     );
     await message.setReaction?.("🤔").catch(() => {});
 
@@ -1212,6 +1213,7 @@ export class Gateway {
           channel,
           systemPrompt,
           session.workdir,
+          ollamaModel,
         );
         await message.setReaction?.("👍").catch(() => {});
         return;
@@ -1332,6 +1334,7 @@ export class Gateway {
     channel: any,
     systemPrompt: string | undefined,
     workdir: string,
+    ollamaModel?: string,
   ): Promise<void> {
     const placeholderId = await channel.sendAndGetId({
       threadId: message.threadId,
@@ -1339,7 +1342,7 @@ export class Gateway {
     });
     try {
       const { callDirect } = await import("./copilot-chat.js");
-      let text = await callDirect(prompt, images, systemPrompt);
+      let text = await callDirect(prompt, images, systemPrompt, ollamaModel);
 
       // Strip [SAVE:...] tags and persist them
       text = await this.processAiResponse(
