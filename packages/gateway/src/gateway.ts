@@ -63,6 +63,7 @@ const CMD_CLAUDE_STATUS  = /^\/claude-status$/i
 const CMD_CLAUDE_KEY     = /^\/claude-key\s+(\S+)/i
 const CMD_MODEL          = /^\/model(?:\s+(\S+))?$/i
 const CMD_VISION_USAGE = /^\/vision-usage$/i
+const CMD_STATUS       = /^\/status$/i
 const CMD_LINK       = /^\/link(?:\s+(\S+))?$/i
 const CMD_HANDOFF    = /^\/handoff\s+(\S+)/i
 const CMD_DIFF       = /^\/diff$/i
@@ -226,6 +227,7 @@ export class Gateway {
           '/copilot-status — check Copilot auth status',
           '/model [name] — show or switch AI model',
           '/vision-usage — check vision budget usage',
+          '/status — show active provider, model, memory stats',
           '/link [accountId] — link identity for cross-channel sessions',
           '/handoff <channelId> — send session summary to another channel',
           '/diff — show git diff of current worktree',
@@ -476,6 +478,32 @@ export class Gateway {
     if (CMD_VISION_USAGE.test(text)) {
       const { count, budget, remaining } = getVisionUsageStatus()
       await channel.send({ threadId: message.threadId, text: `Vision usage today: ${count}/${budget} calls used, ${remaining} remaining.` })
+      return
+    }
+
+    if (CMD_STATUS.test(text)) {
+      const botName = process.env.HYDRA_BOT_NAME ?? 'Hydra'
+      const model = process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'
+      const lines: string[] = [`${botName} — status`]
+      if (isClaudeConfigured()) {
+        lines.push(`Provider: Claude API (${model})`)
+        lines.push(`Key: ...${process.env.ANTHROPIC_API_KEY!.slice(-6)}`)
+      } else if (isCodexConfigured()) {
+        lines.push('Provider: ChatGPT OAuth')
+      } else if (isCopilotConfigured()) {
+        lines.push(`Provider: GitHub Copilot (${process.env.HYDRA_COPILOT_MODEL ?? 'claude-sonnet-4.6'})`)
+      } else {
+        lines.push('Provider: OpenCode (big-pickle)')
+      }
+      const { getHistoryLength } = await import('./history.js')
+      const histLen = getHistoryLength(message.channelId, message.threadId)
+      const memContent = readMemory(message.channelId, message.threadId)
+      const memLines = memContent ? memContent.split('\n').filter(Boolean).length : 0
+      lines.push(`History: ${histLen} messages this session`)
+      lines.push(`Memory: ${memLines} lines`)
+      lines.push(`Channel: ${message.channelId}`)
+      lines.push(`Owner: ${this.isOwner(message.channelId, message.senderId) ? 'yes' : 'no'}`)
+      await channel.send({ threadId: message.threadId, text: lines.join('\n') })
       return
     }
 

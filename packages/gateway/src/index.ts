@@ -13,6 +13,32 @@ import { createLogger } from './logger.js'
 
 const log = createLogger('main')
 
+// Load .env file as fallback for env vars not already set (e.g. when running via launchd)
+function loadDotEnv() {
+  const candidates = [
+    path.join(process.env.HYDRA_WORKDIR ?? process.cwd(), '.env'),
+    path.join(os.homedir(), 'hydra', '.env'),
+    path.join(process.cwd(), '.env'),
+  ]
+  for (const envFile of candidates) {
+    try {
+      if (!fs.existsSync(envFile)) continue
+      const lines = fs.readFileSync(envFile, 'utf8').split('\n')
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed || trimmed.startsWith('#')) continue
+        const eq = trimmed.indexOf('=')
+        if (eq < 1) continue
+        const key = trimmed.slice(0, eq).trim()
+        const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, '')
+        if (key && !process.env[key]) process.env[key] = val
+      }
+      log.info(`Loaded .env from ${envFile}`)
+      break
+    } catch {}
+  }
+}
+
 // Load saved credentials that aren't in .env
 function loadSavedPreferences() {
   try {
@@ -38,6 +64,7 @@ function loadSavedCredentials() {
 }
 
 async function main() {
+  loadDotEnv()
   loadSavedCredentials()
   loadSavedPreferences()
 
