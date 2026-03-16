@@ -22,6 +22,7 @@ import { parseSaveTags, applySaveTag, detectAutoUpdates } from './self-update.js
 import { transcribeAudio, isTranscriptionConfigured } from './transcribe.js'
 import { extractUrls, buildWebContext } from './webfetch.js'
 import { compressMemoryIfNeeded } from './memory.js'
+import { appendHistory, buildPromptWithHistory, clearHistory } from './history.js'
 
 const log = createLogger('gateway')
 
@@ -241,6 +242,7 @@ export class Gateway {
 
     if (CMD_FORGET.test(text)) {
       writeMemory(message.channelId, message.threadId, '')
+      clearHistory(message.channelId, message.threadId)
       await channel.send({ threadId: message.threadId, text: 'Memory cleared.' })
       return
     }
@@ -606,11 +608,19 @@ export class Gateway {
 
     const contextPrefix = goesToOpenCode ? buildMemoryPrompt(message.channelId, message.threadId, true) : ''
 
+    // Record user message in conversation history
+    appendHistory(message.channelId, message.threadId, message.senderName ?? 'user', prompt)
+
     // Fetch web content for any URLs in the message (non-blocking with 15s timeout)
     const urls = extractUrls(prompt)
     const webContext = urls.length ? await buildWebContext(urls) : ''
 
-    const fullPrompt = `${envelope}\n${contextPrefix}${webContext}${prompt}`
+    // For direct chat, inject conversation history context into the prompt
+    const historyPrompt = !goesToOpenCode
+      ? buildPromptWithHistory(message.channelId, message.threadId, prompt, message.senderName)
+      : prompt
+
+    const fullPrompt = `${envelope}\n${contextPrefix}${webContext}${historyPrompt}`
 
     log.info(`[${key}] intent=${intent} route=${goesToOpenCode ? 'opencode' : 'direct'} "${prompt.slice(0, 100)}"`)
     await message.setReaction?.('🤔').catch(() => {})
@@ -657,6 +667,9 @@ export class Gateway {
       // Strip [SAVE:...] tags from OpenCode response and persist them
       finalText = this.processAiResponse(finalText, session.workdir, message.channelId, message.threadId)
 
+      // Record AI response in conversation history
+      appendHistory(message.channelId, message.threadId, process.env.HYDRA_BOT_NAME ?? 'agent_smith', finalText)
+
       if (finalText.trim() === NO_REPLY || finalText.trim() === HEARTBEAT_OK) {
         if (placeholderId) await channel.deleteMessage?.(message.threadId, placeholderId)
         await message.setReaction?.('👍').catch(() => {})
@@ -702,6 +715,9 @@ export class Gateway {
 
       // Strip [SAVE:...] tags and persist them
       text = this.processAiResponse(text, workdir, message.channelId, message.threadId)
+
+      // Record AI response in conversation history
+      appendHistory(message.channelId, message.threadId, process.env.HYDRA_BOT_NAME ?? 'agent_smith', text)
 
       if (text.trim() === NO_REPLY || text.trim() === HEARTBEAT_OK) {
         await channel.deleteMessage?.(message.threadId, placeholderId)
