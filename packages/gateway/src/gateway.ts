@@ -53,6 +53,7 @@ import {
   rollbackWorktree,
 } from "./worktree-manager.js";
 import { buildSystemPrompt, NO_REPLY, HEARTBEAT_OK } from "./system-prompt.js";
+import { runSelfReview, getReviewStats } from "./self-review.js";
 import {
   listPoolAccounts,
   removeAccountFromPool,
@@ -140,6 +141,8 @@ const CMD_OAUTH_CODE = /^\/opencode[-_]code\s+(\S+)/i;
 const CMD_PROVIDERS  = /^\/providers$/i
 const CMD_RESTART    = /^\/restart$/i
 const CMD_PING = /^\/ping$/i;
+const CMD_REVIEW = /^\/review$/i;
+const CMD_REVIEW_STATS = /^\/review[-_]stats$/i;
 
 const NO_CREDS_MSG = [
   "No AI credentials configured.",
@@ -183,6 +186,7 @@ export class Gateway {
     await this.registry.startAll();
     this.scheduler.start();
     this.heartbeat.start();
+    this.startSelfReviewLoop();
     const idleMs = this.config.sessionIdleMs ?? 30 * 60 * 1000;
     this.sweepTimer = setInterval(
       () => this.sessions.sweepIdle(idleMs),
@@ -196,9 +200,37 @@ export class Gateway {
     );
   }
 
+  private selfReviewTimer?: NodeJS.Timeout;
+
+  private startSelfReviewLoop(): void {
+    const intervalHours = parseInt(process.env.HYDRA_REVIEW_INTERVAL_HOURS ?? "6", 10);
+    if (intervalHours <= 0) return;
+    const intervalMs = intervalHours * 60 * 60 * 1000;
+    log.info(`Self-review loop: every ${intervalHours}h`);
+    this.selfReviewTimer = setInterval(async () => {
+      log.info("[self-review] scheduled review starting");
+      try {
+        const result = await runSelfReview();
+        if (!result.changed) return;
+        // Notify owner on all registered channels
+        const ownerIds = (process.env.HYDRA_OWNER_IDS ?? "").split(",").filter(Boolean);
+        for (const ownerId of ownerIds) {
+          const [channelId, senderId] = ownerId.split(":");
+          const channel = this.registry.get(channelId as any);
+          if (!channel) continue;
+          const msg = `🤖 Self-review complete — I improved myself:\n\n${result.summary}${result.willRestart ? "\n\n♻️ Restarting to apply changes..." : ""}`;
+          await channel.send({ threadId: senderId, text: msg }).catch(() => {});
+        }
+      } catch (e) {
+        log.error(`[self-review] scheduled review failed: ${e}`);
+      }
+    }, intervalMs);
+  }
+
   async stop(): Promise<void> {
     log.info("Stopping Hydra gateway...");
     if (this.sweepTimer) clearInterval(this.sweepTimer);
+    if (this.selfReviewTimer) clearInterval(this.selfReviewTimer);
     this.scheduler.stop();
     this.heartbeat.stop();
     for (const [, ctrl] of this.activeRuns) ctrl.abort();
@@ -707,16 +739,18 @@ export class Gateway {
         "o3-mini",
       ];
       const OLLAMA_MODELS = [
-        "nemotron-3-super:120b",
-        "nemotron-mini",
-        "llama3.2",
-        "llama3.1:70b",
-        "mistral",
-        "qwen2.5:72b",
+        "nemotron-3-super",   // 120B MoE, 12B active, 256K ctx — research
+        "devstral-2:123b",    // 123B — coding specialist
+        "deepseek-v3.2",      // deep reasoning
+        "gpt-oss:120b",       // OpenAI open-source 120B
+        "qwen3-next:80b",     // 80B — fast + smart
+        "mistral-large-3:675b", // 675B — most capable
+        "nemotron-3-nano:30b", // 30B — fast
+        "nemotron-mini",      // local only
       ];
       const usingCopilot = isCopilotConfigured() && !isClaudeConfigured();
       const currentClaude = process.env.HYDRA_CLAUDE_MODEL ?? (usingCopilot ? "claude-sonnet-4.6" : "claude-sonnet-4-6");
-      const currentOllama = process.env.HYDRA_OLLAMA_MODEL ?? (isOllamaCloud() ? "nemotron-3-super:120b" : "nemotron-mini");
+      const currentOllama = process.env.HYDRA_OLLAMA_MODEL ?? (isOllamaCloud() ? "nemotron-3-super" : "nemotron-mini");
       const fmtC = (m: string) => (m === currentClaude ? `${m} ← active` : m);
       const fmtO = (m: string) => (m === currentOllama ? `${m} ← active` : m);
       if (!modelMatch[1]) {
@@ -985,6 +1019,30 @@ export class Gateway {
     const prMatch = PR_PATTERN.exec(text);
     if (prMatch && this.config.worktrees) {
       await this.handlePRCheckout(message, parseInt(prMatch[1], 10));
+      return;
+    }
+
+    if (CMD_REVIEW.test(text)) {
+      const session = this.sessions.getOrCreate(message);
+      await channel.send({ threadId: message.threadId, text: "🔍 Starting self-review..." });
+      const result = await runSelfReview(session.workdir);
+      const msg = result.changed
+        ? `✅ Self-review complete — ${result.filesModified.length} file(s) improved${result.willRestart ? "\n♻️ Restarting to apply changes..." : ""}\n\n${result.summary}`
+        : `✅ ${result.summary}`;
+      await channel.send({ threadId: message.threadId, text: msg });
+      return;
+    }
+
+    if (CMD_REVIEW_STATS.test(text)) {
+      const stats = getReviewStats();
+      const lines = [
+        `Total reviews run: ${stats.totalReviews}`,
+        `Last review: ${stats.lastRunAt}`,
+        '',
+        'Recent improvements:',
+        ...stats.recentImprovements.map((s, i) => `${i + 1}. ${s}`),
+      ];
+      await channel.send({ threadId: message.threadId, text: lines.join('\n') || 'No reviews run yet.' });
       return;
     }
 
