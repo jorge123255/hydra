@@ -588,7 +588,11 @@ export class Gateway {
     const envelope = buildEnvelope(message.channelId, message.senderName, message.timestamp, lastAt)
     this.lastMessageAt.set(threadKey, message.timestamp)
 
-    const goesToOpenCode = !(intent === 'fast' || (intent === 'chat' && (isClaudeConfigured() || isCodexConfigured() || isCopilotConfigured())))
+    const goesToOpenCode = !(
+      intent === 'fast' ||
+      intent === 'computer' ||
+      ((intent === 'chat' || intent === 'vision') && (isClaudeConfigured() || isCodexConfigured() || isCopilotConfigured()))
+    )
     const memory = readMemory(message.channelId, message.threadId)
 
     const promptMode = intent === 'computer' ? 'computer' : (goesToOpenCode ? 'code' : 'chat')
