@@ -21,11 +21,10 @@ export { isClaudeOAuthAvailable, getValidClaudeToken } from './auth/claude-keych
 export {
   isCodexPoolConfigured,
   listPoolAccounts,
-  callCodexPool,
-  callCodexParallel,
-  startCodexPoolLogin,
-  addAccountToPool,
+  addKeyToPool,
   removeAccountFromPool,
+  callSubagent,
+  callSubagentsParallel,
 } from './auth/codex-pool.js'
 export {
   isOllamaConfigured,
@@ -43,7 +42,7 @@ import os from 'node:os'
 import { resolveCopilotCredentials } from './auth/github-copilot.js'
 import { getValidClaudeToken } from './auth/claude-keychain.js'
 import { isOllamaAvailable, callOllama } from './auth/ollama.js'
-import { isCodexPoolConfigured, callCodexPool } from './auth/codex-pool.js'
+import { isCodexPoolConfigured, callSubagent } from './auth/codex-pool.js'
 import { getVisionUsage } from '@hydra/computer-use'
 import { createLogger } from './logger.js'
 
@@ -299,7 +298,7 @@ export async function callDirect(
   // Cloud fallback chain (cost-aware: pool accounts free, then OAuth, then paid)
   if (isCodexPoolConfigured()) {
     log.debug('Routing to ChatGPT pool')
-    return callCodexPool(prompt, undefined, 'gpt-4o')
+    return callSubagent(prompt, undefined)
   }
   if (isClaudeConfigured()) return callClaudeDirect(prompt, images, systemPrompt)
   const { isCodexConfigured, callCodexDirect } = await import('./auth/chatgpt-codex.js')

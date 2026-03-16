@@ -55,7 +55,9 @@ import { buildSystemPrompt, NO_REPLY, HEARTBEAT_OK } from "./system-prompt.js";
 import {
   listPoolAccounts,
   removeAccountFromPool,
-  startCodexPoolLogin,
+  addKeyToPool,
+  callSubagentsParallel,
+  isCodexPoolConfigured,
 } from "./auth/codex-pool.js";
 import { ensureWorkspaceFiles, readWorkspaceFiles } from "./workspace.js";
 import { HeartbeatManager, HEARTBEAT_PROMPT } from "./heartbeat.js";
@@ -120,6 +122,7 @@ const CMD_CHATGPT = /^\/chatgpt[-_]login(?:\s+(.+))?$/i;
 const CMD_CHATGPT_STATUS = /^\/chatgpt[-_]status$/i;
 const CMD_CHATGPT_ACCOUNTS = /^\/chatgpt[-_]accounts$/i;
 const CMD_CHATGPT_REMOVE = /^\/chatgpt[-_]remove\s+(\S+)/i;
+const CMD_CHATGPT_KEY = /^\/chatgpt[-_](?:login|key)\s+(\S+)\s+(sk-\S+)/i;
 const CMD_COPILOT_STATUS = /^\/copilot[-_]status$/i;
 const CMD_CLAUDE_STATUS = /^\/claude[-_]status$/i;
 const CMD_CLAUDE_KEY = /^\/claude[-_]key\s+(\S+)/i;
@@ -223,19 +226,36 @@ export class Gateway {
       .filter(Boolean);
   }
 
-  /** Strip [SAVE: key=value] and [RESTART] tags from AI response, apply them */
-  private processAiResponse(
+  /** Strip [SAVE:], [RESTART], [SUBAGENT:] tags, apply them, return clean text */
+  private async processAiResponse(
     text: string,
     workdir: string,
     channelId: string,
     threadId: string,
-  ): string {
+  ): Promise<string> {
     const { clean, tags, shouldRestart } = parseSaveTags(text);
     for (const tag of tags) {
       applySaveTag(tag, workdir, channelId, threadId);
     }
     if (shouldRestart) scheduleSelfRestart();
-    return clean;
+
+    // Run [SUBAGENT: task1 | task2 | task3] fan-outs
+    const subagentPattern = /\[SUBAGENT:\s*([^\]]+)\]/gi;
+    let result = clean;
+    const subagentMatches = [...clean.matchAll(subagentPattern)];
+    for (const match of subagentMatches) {
+      const tasks = match[1].split('|').map(t => t.trim()).filter(Boolean);
+      if (tasks.length === 0 || !isCodexPoolConfigured()) continue;
+      try {
+        log.info(`[subagent] fanning out ${tasks.length} task(s) to ChatGPT pool`);
+        const results = await callSubagentsParallel(tasks);
+        const formatted = results.map((r, i) => `**Subagent ${i+1}:** ${r}`).join('\n\n');
+        result = result.replace(match[0], `\n\n---\n${formatted}\n---`);
+      } catch (e) {
+        result = result.replace(match[0], `[subagent error: ${e}]`);
+      }
+    }
+    return result;
   }
 
   // ── Inbound debounce ─────────────────────────────────────────────────────────
@@ -546,28 +566,36 @@ export class Gateway {
       return;
     }
 
+    // /chatgpt_login label sk-...  OR  /chatgpt_key label sk-...
+    const chatgptKeyMatch = CMD_CHATGPT_KEY.exec(text);
+    if (chatgptKeyMatch) {
+      if (!this.isOwner(message.channelId, message.senderId)) {
+        await channel.send({ threadId: message.threadId, text: "Only the bot owner can add ChatGPT accounts." });
+        return;
+      }
+      const [, label, apiKey] = chatgptKeyMatch;
+      try {
+        await addKeyToPool(label, apiKey);
+        const accounts = listPoolAccounts();
+        await channel.send({ threadId: message.threadId, text: `✅ ChatGPT subagent "${label}" added! Pool: ${accounts.length} account(s).\nUse /chatgpt_accounts to list all.` });
+      } catch (e) {
+        await channel.send({ threadId: message.threadId, text: `Failed to add account: ${e}` });
+      }
+      return;
+    }
+
+    // /chatgpt_login with no key — show instructions
     const chatgptLoginMatch = CMD_CHATGPT.exec(text);
     if (chatgptLoginMatch) {
       if (!this.isOwner(message.channelId, message.senderId)) {
         await channel.send({ threadId: message.threadId, text: "Only the bot owner can add ChatGPT accounts." });
         return;
       }
-      const label = chatgptLoginMatch[1]?.trim() || `account-${Date.now()}`;
-      try {
-        const login = await startCodexPoolLogin(label);
-        await channel.send({
-          threadId: message.threadId,
-          text: `ChatGPT Login (${label}):\n\n1. Open: ${login.verificationUri}\n2. Enter code: ${login.userCode}\n\nWaiting for authorization...`,
-        });
-        const success = await login.poll();
-        if (success) {
-          await channel.send({ threadId: message.threadId, text: `✅ ChatGPT account "${label}" added to pool!\nRun /chatgpt_accounts to see all accounts.` });
-        } else {
-          await channel.send({ threadId: message.threadId, text: `ChatGPT login timed out. Try /chatgpt_login ${label} again.` });
-        }
-      } catch (e) {
-        await channel.send({ threadId: message.threadId, text: `ChatGPT login failed: ${e}` });
-      }
+      const label = chatgptLoginMatch[1]?.trim() || "account1";
+      await channel.send({
+        threadId: message.threadId,
+        text: `To add ChatGPT subagent "${label}":\n\n1. Go to https://platform.openai.com/api-keys\n2. Create a new secret key\n3. Run: /chatgpt_login ${label} sk-proj-...\n\nEach account becomes a parallel subagent Claude can delegate tasks to.`,
+      });
       return;
     }
 
@@ -1157,7 +1185,7 @@ export class Gateway {
         (result.error ? `\n\n⚠️ ${result.error}` : "");
 
       // Strip [SAVE:...] tags from OpenCode response and persist them
-      finalText = this.processAiResponse(
+      finalText = await this.processAiResponse(
         finalText,
         session.workdir,
         message.channelId,
@@ -1238,7 +1266,7 @@ export class Gateway {
       let text = await callDirect(prompt, images, systemPrompt);
 
       // Strip [SAVE:...] tags and persist them
-      text = this.processAiResponse(
+      text = await this.processAiResponse(
         text,
         workdir,
         message.channelId,
@@ -1357,7 +1385,7 @@ export class Gateway {
         response = await callDirect(HEARTBEAT_PROMPT, undefined, systemPrompt);
       }
 
-      response = this.processAiResponse(
+      response = await this.processAiResponse(
         response,
         target.workdir,
         target.channelId,
