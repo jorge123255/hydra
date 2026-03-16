@@ -38,7 +38,6 @@ import {
   resolveCopilotCredentials,
   getVisionUsageStatus,
   isCodexConfigured,
-  startCodexLogin,
 } from "./copilot-chat.js";
 import {
   buildAuthUrl,
@@ -53,6 +52,11 @@ import {
   rollbackWorktree,
 } from "./worktree-manager.js";
 import { buildSystemPrompt, NO_REPLY, HEARTBEAT_OK } from "./system-prompt.js";
+import {
+  listPoolAccounts,
+  removeAccountFromPool,
+  startCodexPoolLogin,
+} from "./auth/codex-pool.js";
 import { ensureWorkspaceFiles, readWorkspaceFiles } from "./workspace.js";
 import { HeartbeatManager, HEARTBEAT_PROMPT } from "./heartbeat.js";
 import {
@@ -111,22 +115,24 @@ const CMD_HELP = /^\/help$/i;
 const CMD_APPROVE = /^\/approve\s+(\S+)\s+(\S+)/i;
 const CMD_REVOKE = /^\/revoke\s+(\S+)\s+(\S+)/i;
 const CMD_PENDING = /^\/pending(?:\s+(\S+))?$/i;
-const CMD_COPILOT = /^\/copilot-login$/i;
-const CMD_CHATGPT = /^\/chatgpt-login$/i;
-const CMD_CHATGPT_STATUS = /^\/chatgpt-status$/i;
-const CMD_COPILOT_STATUS = /^\/copilot-status$/i;
-const CMD_CLAUDE_STATUS = /^\/claude-status$/i;
-const CMD_CLAUDE_KEY = /^\/claude-key\s+(\S+)/i;
+const CMD_COPILOT = /^\/copilot[-_]login$/i;
+const CMD_CHATGPT = /^\/chatgpt[-_]login(?:\s+(.+))?$/i;
+const CMD_CHATGPT_STATUS = /^\/chatgpt[-_]status$/i;
+const CMD_CHATGPT_ACCOUNTS = /^\/chatgpt[-_]accounts$/i;
+const CMD_CHATGPT_REMOVE = /^\/chatgpt[-_]remove\s+(\S+)/i;
+const CMD_COPILOT_STATUS = /^\/copilot[-_]status$/i;
+const CMD_CLAUDE_STATUS = /^\/claude[-_]status$/i;
+const CMD_CLAUDE_KEY = /^\/claude[-_]key\s+(\S+)/i;
 const CMD_MODEL = /^\/model(?:\s+(\S+))?$/i;
-const CMD_VISION_USAGE = /^\/vision-usage$/i;
+const CMD_VISION_USAGE = /^\/vision[-_]usage$/i;
 const CMD_STATUS = /^\/status$/i;
 const CMD_LINK = /^\/link(?:\s+(\S+))?$/i;
 const CMD_HANDOFF = /^\/handoff\s+(\S+)/i;
 const CMD_DIFF = /^\/diff$/i;
 const CMD_ROLLBACK = /^\/rollback$/i;
 const PR_PATTERN = /\bpr\s*#(\d+)/i;
-const CMD_LOGIN = /^\/opencode-login$/i;
-const CMD_OAUTH_CODE = /^\/opencode-code\s+(\S+)/i;
+const CMD_LOGIN = /^\/opencode[-_]login$/i;
+const CMD_OAUTH_CODE = /^\/opencode[-_]code\s+(\S+)/i;
 const CMD_PROVIDERS  = /^\/providers$/i
 const CMD_RESTART    = /^\/restart$/i
 const CMD_PING = /^\/ping$/i;
@@ -540,37 +546,27 @@ export class Gateway {
       return;
     }
 
-    if (CMD_CHATGPT.test(text)) {
+    const chatgptLoginMatch = CMD_CHATGPT.exec(text);
+    if (chatgptLoginMatch) {
       if (!this.isOwner(message.channelId, message.senderId)) {
-        await channel.send({
-          threadId: message.threadId,
-          text: "Only the bot owner can configure ChatGPT.",
-        });
+        await channel.send({ threadId: message.threadId, text: "Only the bot owner can add ChatGPT accounts." });
         return;
       }
+      const label = chatgptLoginMatch[1]?.trim() || `account-${Date.now()}`;
       try {
-        const login = await startCodexLogin();
+        const login = await startCodexPoolLogin(label);
         await channel.send({
           threadId: message.threadId,
-          text: `ChatGPT Login:\n\n1. Open: ${login.verificationUri}\n2. Enter code: ${login.userCode}\n\nWaiting for authorization...`,
+          text: `ChatGPT Login (${label}):\n\n1. Open: ${login.verificationUri}\n2. Enter code: ${login.userCode}\n\nWaiting for authorization...`,
         });
         const success = await login.poll();
         if (success) {
-          await channel.send({
-            threadId: message.threadId,
-            text: "ChatGPT (GPT-4o) connected! Chat messages will now use GPT-4o.",
-          });
+          await channel.send({ threadId: message.threadId, text: `✅ ChatGPT account "${label}" added to pool!\nRun /chatgpt_accounts to see all accounts.` });
         } else {
-          await channel.send({
-            threadId: message.threadId,
-            text: "ChatGPT login timed out. Try /chatgpt-login again.",
-          });
+          await channel.send({ threadId: message.threadId, text: `ChatGPT login timed out. Try /chatgpt_login ${label} again.` });
         }
       } catch (e) {
-        await channel.send({
-          threadId: message.threadId,
-          text: `ChatGPT login failed: ${e}`,
-        });
+        await channel.send({ threadId: message.threadId, text: `ChatGPT login failed: ${e}` });
       }
       return;
     }
@@ -584,9 +580,29 @@ export class Gateway {
       } else {
         await channel.send({
           threadId: message.threadId,
-          text: "ChatGPT not configured. Run /chatgpt-login",
+          text: "ChatGPT not configured. Run /chatgpt_login",
         });
       }
+      return;
+    }
+
+    if (CMD_CHATGPT_ACCOUNTS.test(text)) {
+      const accounts = listPoolAccounts();
+      if (accounts.length === 0) {
+        await channel.send({ threadId: message.threadId, text: "No ChatGPT accounts in pool. Add one with /chatgpt_login" });
+      } else {
+        const lines = accounts.map((a, i) =>
+          `${i + 1}. [${a.id.slice(0, 6)}] ${a.label} — ${a.callCount} calls${a.rateLimitedUntil ? ' ⚠️ rate-limited' : ''}`
+        );
+        await channel.send({ threadId: message.threadId, text: `ChatGPT pool (${accounts.length} accounts):\n${lines.join('\n')}` });
+      }
+      return;
+    }
+
+    const chatgptRemoveMatch = CMD_CHATGPT_REMOVE.exec(text);
+    if (chatgptRemoveMatch) {
+      const removed = removeAccountFromPool(chatgptRemoveMatch[1]);
+      await channel.send({ threadId: message.threadId, text: removed ? `Removed account ${chatgptRemoveMatch[1]}` : `Account ${chatgptRemoveMatch[1]} not found` });
       return;
     }
 
