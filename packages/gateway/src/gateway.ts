@@ -637,6 +637,7 @@ export class Gateway {
       }
 
       if (!goesToOpenCode) {
+        await channel.sendTyping(message.threadId)
         await this.runDirectChat(message, fullPrompt, message.images, channel, systemPrompt, session.workdir)
         await message.setReaction?.('👍').catch(() => {})
         return

@@ -148,7 +148,7 @@ export function buildSystemPrompt(ctx: PromptContext): string {
   }
 
   // ── Workspace bootstrap files ──────────────────────────────────────────────
-  const fileOrder = ['USER.md', 'MEMORY.md', 'HEARTBEAT.md']
+  const fileOrder = ['AGENTS.md', 'USER.md', 'MEMORY.md', 'HEARTBEAT.md']
   const fileBlocks = fileOrder
     .filter((f) => ctx.bootstrapFiles?.[f]?.trim())
     .map((f) => `### ${f}\n${ctx.bootstrapFiles![f].trim()}`)
