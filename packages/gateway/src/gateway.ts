@@ -38,6 +38,7 @@ import {
   resolveCopilotCredentials,
   getVisionUsageStatus,
   isCodexConfigured,
+  isOllamaCloud,
 } from "./copilot-chat.js";
 import {
   buildAuthUrl,
@@ -705,53 +706,70 @@ export class Gateway {
         "gpt-4.1-mini",
         "o3-mini",
       ];
+      const OLLAMA_MODELS = [
+        "nemotron-3-super:120b",
+        "nemotron-mini",
+        "llama3.2",
+        "llama3.1:70b",
+        "mistral",
+        "qwen2.5:72b",
+      ];
       const usingCopilot = isCopilotConfigured() && !isClaudeConfigured();
+      const currentClaude = process.env.HYDRA_CLAUDE_MODEL ?? (usingCopilot ? "claude-sonnet-4.6" : "claude-sonnet-4-6");
+      const currentOllama = process.env.HYDRA_OLLAMA_MODEL ?? (isOllamaCloud() ? "nemotron-3-super:120b" : "nemotron-mini");
+      const fmtC = (m: string) => (m === currentClaude ? `${m} ← active` : m);
+      const fmtO = (m: string) => (m === currentOllama ? `${m} ← active` : m);
       if (!modelMatch[1]) {
-        const current =
-          process.env.HYDRA_CLAUDE_MODEL ??
-          (usingCopilot ? "claude-sonnet-4.6" : "claude-sonnet-4-6");
-        const fmt = (m: string) => (m === current ? `${m} (current)` : m);
         await channel.send({
           threadId: message.threadId,
           text: [
-            `Current model: ${current}`,
+            "── Claude (coding/chat) ──",
+            ...CLAUDE_MODELS.map(fmtC),
             "",
-            "Anthropic API:",
-            ...CLAUDE_MODELS.map(fmt),
+            "── GitHub Copilot ──",
+            ...COPILOT_MODELS.map(fmtC),
             "",
-            "GitHub Copilot:",
-            ...COPILOT_MODELS.map(fmt),
+            `── Ollama ${isOllamaCloud() ? "Cloud" : "Local"} (research) ──`,
+            ...OLLAMA_MODELS.map(fmtO),
             "",
-            "Switch with /model <name>",
+            "Switch: /model <name>",
+            "Example: /model nemotron-3-super:120b",
           ].join("\n"),
         });
         return;
       }
       const requested = modelMatch[1].toLowerCase();
-      const match = [...CLAUDE_MODELS, ...COPILOT_MODELS].find(
-        (m) =>
-          m.toLowerCase() === requested || m.toLowerCase().includes(requested),
+      // Check Ollama models first
+      const ollamaMatch = OLLAMA_MODELS.find(
+        (m) => m.toLowerCase() === requested || m.toLowerCase().includes(requested)
       );
-      if (!match) {
-        await channel.send({
-          threadId: message.threadId,
-          text: `Unknown model ${requested}`,
-        });
+      if (ollamaMatch) {
+        process.env.HYDRA_OLLAMA_MODEL = ollamaMatch;
+        const prefPath = path.join(os.homedir(), ".hydra", "preferences.json");
+        let prefs: Record<string, string> = {};
+        try { prefs = JSON.parse(fs.readFileSync(prefPath, "utf8")); } catch {}
+        prefs.HYDRA_OLLAMA_MODEL = ollamaMatch;
+        fs.mkdirSync(path.dirname(prefPath), { recursive: true });
+        fs.writeFileSync(prefPath, JSON.stringify(prefs, null, 2));
+        await channel.send({ threadId: message.threadId, text: `Ollama model → ${ollamaMatch}` });
         return;
       }
-      process.env.HYDRA_CLAUDE_MODEL = match;
+      // Check Claude/Copilot models
+      const claudeMatch = [...CLAUDE_MODELS, ...COPILOT_MODELS].find(
+        (m) => m.toLowerCase() === requested || m.toLowerCase().includes(requested),
+      );
+      if (!claudeMatch) {
+        await channel.send({ threadId: message.threadId, text: `Unknown model "${requested}". Run /model to see options.` });
+        return;
+      }
+      process.env.HYDRA_CLAUDE_MODEL = claudeMatch;
       const prefPath = path.join(os.homedir(), ".hydra", "preferences.json");
       let prefs: Record<string, string> = {};
-      try {
-        prefs = JSON.parse(fs.readFileSync(prefPath, "utf8"));
-      } catch {}
-      prefs.HYDRA_CLAUDE_MODEL = match;
+      try { prefs = JSON.parse(fs.readFileSync(prefPath, "utf8")); } catch {}
+      prefs.HYDRA_CLAUDE_MODEL = claudeMatch;
       fs.mkdirSync(path.dirname(prefPath), { recursive: true });
       fs.writeFileSync(prefPath, JSON.stringify(prefs, null, 2));
-      await channel.send({
-        threadId: message.threadId,
-        text: `Switched to ${match}`,
-      });
+      await channel.send({ threadId: message.threadId, text: `Claude model → ${claudeMatch}` });
       return;
     }
 

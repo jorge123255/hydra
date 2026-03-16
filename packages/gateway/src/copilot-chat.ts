@@ -27,6 +27,7 @@ export {
   callSubagentsParallel,
 } from './auth/codex-pool.js'
 export {
+  isOllamaCloud,
   isOllamaConfigured,
   isOllamaAvailable,
   listOllamaModels,
