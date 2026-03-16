@@ -8,6 +8,12 @@ const CODE_PATTERNS = [
   /\.(ts|js|py|go|rs|java|cpp|c|rb|php|swift|kt)\b/,
   /\b(git|npm|pnpm|yarn|docker|kubernetes|sql|api|endpoint|database|schema)\b/i,
   /```/, // code block
+  // Self-improvement patterns — agent editing its own code
+  /\b(improve|update|modify|change|edit|add|fix|upgrade)\s+(your(self)?|your\s+(code|source|bot|gateway|router|system|prompt|behavior|response))/i,
+  /\byour\s+(code|source|codebase|implementation|logic|behavior)\b/i,
+  /\b(add|create|implement)\s+a?\s*\/([\w-]+)\s+(command|feature)/i,
+  /\bself[- ]?(improve|cod|modif|updat)/i,
+  /\b(make yourself|teach yourself|update yourself)\b/i,
 ]
 
 const COMPUTER_PATTERNS = [

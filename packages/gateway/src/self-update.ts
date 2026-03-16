@@ -1,10 +1,11 @@
-// Self-update module — lets the bot persist what it learns.
+// Self-update module — lets the bot persist what it learns AND restart itself.
 //
 // Two mechanisms:
 // 1. [SAVE: key=value] tags in AI responses — stripped before sending, written to memory.
-// 2. Auto-detection of obvious user-driven updates (name changes, user facts).
+// 2. [RESTART] tag — triggers a launchd reload of the gateway daemon (self-coding loop).
+// 3. Auto-detection of obvious user-driven updates (name changes, user facts).
 //
-// Supported keys:
+// Supported [SAVE:] keys:
 //   bot_name       → updates HYDRA_BOT_NAME + SOUL.md + .env
 //   user_name      → updates USER.md
 //   user_location  → updates USER.md + HYDRA_USER_LOCATION
@@ -15,6 +16,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { spawn } from 'node:child_process'
 import { createLogger } from './logger.js'
 import { appendMemory } from './memory.js'
 
@@ -23,20 +25,28 @@ const log = createLogger('self-update')
 const DATA_DIR = process.env.HYDRA_DATA_DIR ?? path.join(os.homedir(), '.hydra')
 const ENV_FILE = path.join(os.homedir(), 'hydra', '.env')
 
-// ── [SAVE: ...] tag parsing ────────────────────────────────────────────────────
+// ── [SAVE: ...] and [RESTART] tag parsing ─────────────────────────────────────
 
 const SAVE_TAG_RE = /\[SAVE:\s*([^\]=]+?)\s*=\s*([^\]]+?)\s*\]/gi
+const RESTART_TAG_RE = /\[RESTART\]/gi
 
 export type SaveTag = { key: string; value: string }
 
-/** Strip [SAVE: key=value] tags from text and return them separately */
-export function parseSaveTags(text: string): { clean: string; tags: SaveTag[] } {
+/** Strip [SAVE: key=value] and [RESTART] tags from text, return them separately */
+export function parseSaveTags(text: string): { clean: string; tags: SaveTag[]; shouldRestart: boolean } {
+  let shouldRestart = false
   const tags: SaveTag[] = []
-  const clean = text.replace(SAVE_TAG_RE, (_, key, value) => {
+
+  let clean = text.replace(RESTART_TAG_RE, () => {
+    shouldRestart = true
+    return ''
+  })
+  clean = clean.replace(SAVE_TAG_RE, (_, key, value) => {
     tags.push({ key: key.trim().toLowerCase(), value: value.trim() })
     return ''
   }).replace(/\n{3,}/g, '\n\n').trim()
-  return { clean, tags }
+
+  return { clean, tags, shouldRestart }
 }
 
 /** Apply a single save tag — writes to the appropriate persistence layer */
@@ -72,9 +82,24 @@ export function applySaveTag(
       appendMemory(channelId, threadId, value)
       break
     default:
-      // Generic key — just append to memory
       appendMemory(channelId, threadId, `${key}: ${value}`)
   }
+}
+
+/**
+ * Schedule a self-restart via launchd.
+ * Spawns a detached shell that waits 2s (for current process to finish sending reply),
+ * then unloads + reloads the plist. The current process dies cleanly via launchd unload.
+ */
+export function scheduleSelfRestart(): void {
+  const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', 'ai.hydra.gateway.plist')
+  const script = `sleep 2 && launchctl unload "${plist}" && sleep 1 && launchctl load "${plist}"`
+  const child = spawn('bash', ['-c', script], {
+    detached: true,
+    stdio: 'ignore',
+  })
+  child.unref()
+  log.info('Self-restart scheduled in 2s via launchd...')
 }
 
 // ── Auto-detect user-driven updates ─────────────────────────────────────────────
@@ -104,7 +129,6 @@ export function detectAutoUpdates(userText: string): SaveTag[] {
   ]
   for (const re of userNamePatterns) {
     const m = re.exec(text)
-    // Avoid false positives like "I'm asking about..."
     if (m && m[1].length < 30) { tags.push({ key: 'user_name', value: m[1].trim() }); break }
   }
 
@@ -127,12 +151,10 @@ function setBotName(name: string, workdir: string): void {
   process.env.HYDRA_BOT_NAME = name
   persistEnvVar('HYDRA_BOT_NAME', name)
 
-  // Update SOUL.md in workdir to use new name
   const soulPath = path.join(workdir, 'SOUL.md')
   try {
     if (fs.existsSync(soulPath)) {
       let soul = fs.readFileSync(soulPath, 'utf8')
-      // Replace the name references
       soul = soul
         .replace(/^You are \S+/m, `You are ${name}`)
         .replace(/Your name is \S+\./g, `Your name is ${name}.`)
@@ -163,7 +185,6 @@ function updateUserFile(workdir: string, field: string, value: string): void {
 
 /** Persist an env var to the .env file so it survives restarts */
 function persistEnvVar(key: string, value: string): void {
-  // Try a few likely .env paths
   const candidates = [
     ENV_FILE,
     path.join(os.homedir(), 'hydra', '.env'),
