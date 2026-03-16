@@ -682,7 +682,13 @@ export class Gateway {
       }
 
       if (placeholderId && finalText.trim()) {
-        await channel.editMessage(message.threadId, placeholderId, finalText).catch(() => {})
+        if (finalText.length > 4000) {
+          // Too long to edit — delete placeholder and send chunked
+          await channel.deleteMessage?.(message.threadId, placeholderId)
+          await channel.send({ threadId: message.threadId, text: finalText })
+        } else {
+          await channel.editMessage(message.threadId, placeholderId, finalText).catch(() => {})
+        }
       } else if (finalText.trim()) {
         await channel.send({ threadId: message.threadId, text: finalText })
       } else {
