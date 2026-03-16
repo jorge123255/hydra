@@ -2,6 +2,8 @@
 // Priority: 1) Anthropic API key (Claude) 2) GitHub Copilot 3) throw
 // Copilot is reserved for vision when Claude API key is set.
 
+export { isCodexConfigured, callCodexDirect, startCodexLogin } from './auth/chatgpt-codex.js'
+
 export {
   isCopilotConfigured,
   githubCopilotLogin,
@@ -144,7 +146,10 @@ export async function callDirect(
   images?: string[],
   systemPrompt?: string
 ): Promise<string> {
+  // Priority: Claude API key → ChatGPT Codex OAuth → GitHub Copilot
   if (isClaudeConfigured()) return callClaudeDirect(prompt, images, systemPrompt)
+  const { isCodexConfigured, callCodexDirect } = await import('./auth/chatgpt-codex.js')
+  if (isCodexConfigured()) return callCodexDirect(prompt, images, systemPrompt)
   return callCopilotDirect(prompt, images, systemPrompt)
 }
 

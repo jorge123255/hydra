@@ -12,7 +12,7 @@ import { buildMemoryPrompt, appendMemory, writeMemory, searchMemory, buildEnvelo
 import { createLogger } from './logger.js'
 import { isAllowed, upsertPairingRequest, approvePairing, revokePairing, listPendingRequests } from './pairing.js'
 import { classifyIntent, stripIntentPrefix } from './router.js'
-import { isCopilotConfigured, isClaudeConfigured, getValidClaudeToken, githubCopilotLogin, resolveCopilotCredentials, getVisionUsageStatus } from './copilot-chat.js'
+import { isCopilotConfigured, isClaudeConfigured, getValidClaudeToken, githubCopilotLogin, resolveCopilotCredentials, getVisionUsageStatus, isCodexConfigured, startCodexLogin } from './copilot-chat.js'
 import { buildAuthUrl, exchangeCode, saveResult, saveApiKey, type PendingOAuth } from './auth/anthropic-oauth.js'
 import { createFromPR, getWorktreeDiff, rollbackWorktree } from './worktree-manager.js'
 import { buildSystemPrompt, NO_REPLY, HEARTBEAT_OK } from './system-prompt.js'
@@ -35,7 +35,7 @@ function hasOpencodeAuth(): boolean {
 }
 
 function hasAnyCredentials(): boolean {
-  return isClaudeConfigured() || isCopilotConfigured() || hasOpencodeAuth()
+  return isClaudeConfigured() || isCodexConfigured() || isCopilotConfigured() || hasOpencodeAuth()
 }
 
 export type GatewayConfig = {
@@ -55,6 +55,8 @@ const CMD_APPROVE    = /^\/approve\s+(\S+)\s+(\S+)/i
 const CMD_REVOKE     = /^\/revoke\s+(\S+)\s+(\S+)/i
 const CMD_PENDING    = /^\/pending(?:\s+(\S+))?$/i
 const CMD_COPILOT    = /^\/copilot-login$/i
+const CMD_CHATGPT    = /^\/chatgpt-login$/i
+const CMD_CHATGPT_STATUS = /^\/chatgpt-status$/i
 const CMD_COPILOT_STATUS = /^\/copilot-status$/i
 const CMD_CLAUDE_STATUS  = /^\/claude-status$/i
 const CMD_CLAUDE_KEY     = /^\/claude-key\s+(\S+)/i
@@ -364,6 +366,34 @@ export class Gateway {
       return
     }
 
+    if (CMD_CHATGPT.test(text)) {
+      if (!this.isOwner(message.channelId, message.senderId)) {
+        await channel.send({ threadId: message.threadId, text: 'Only the bot owner can configure ChatGPT.' }); return
+      }
+      try {
+        const login = await startCodexLogin()
+        await channel.send({ threadId: message.threadId, text: `ChatGPT Login:\n\n1. Open: ${login.verificationUri}\n2. Enter code: ${login.userCode}\n\nWaiting for authorization...` })
+        const success = await login.poll()
+        if (success) {
+          await channel.send({ threadId: message.threadId, text: 'ChatGPT (GPT-4o) connected! Chat messages will now use GPT-4o.' })
+        } else {
+          await channel.send({ threadId: message.threadId, text: 'ChatGPT login timed out. Try /chatgpt-login again.' })
+        }
+      } catch (e) {
+        await channel.send({ threadId: message.threadId, text: `ChatGPT login failed: ${e}` })
+      }
+      return
+    }
+
+    if (CMD_CHATGPT_STATUS.test(text)) {
+      if (isCodexConfigured()) {
+        await channel.send({ threadId: message.threadId, text: 'ChatGPT (GPT-4o): connected via OAuth' })
+      } else {
+        await channel.send({ threadId: message.threadId, text: 'ChatGPT not configured. Run /chatgpt-login' })
+      }
+      return
+    }
+
     if (CMD_COPILOT.test(text)) {
       if (!this.isOwner(message.channelId, message.senderId)) {
         await channel.send({ threadId: message.threadId, text: 'Only the bot owner can configure Copilot.' }); return
@@ -556,7 +586,7 @@ export class Gateway {
     const envelope = buildEnvelope(message.channelId, message.senderName, message.timestamp, lastAt)
     this.lastMessageAt.set(threadKey, message.timestamp)
 
-    const goesToOpenCode = !(intent === 'fast' || (intent === 'chat' && (isClaudeConfigured() || isCopilotConfigured())))
+    const goesToOpenCode = !(intent === 'fast' || (intent === 'chat' && (isClaudeConfigured() || isCodexConfigured() || isCopilotConfigured())))
     const memory = readMemory(message.channelId, message.threadId)
 
     const promptMode = intent === 'computer' ? 'computer' : (goesToOpenCode ? 'code' : 'chat')
