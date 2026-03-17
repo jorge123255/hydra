@@ -41,7 +41,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { resolveCopilotCredentials } from './auth/github-copilot.js'
-import { getValidClaudeToken } from './auth/claude-keychain.js'
+import { getValidClaudeToken, getValidClaudeTokenAsync } from './auth/claude-keychain.js'
 import { isOllamaAvailable, callOllama } from './auth/ollama.js'
 import { isCodexPoolConfigured, callSubagent } from './auth/codex-pool.js'
 import { getVisionUsage } from '@hydra/computer-use'
@@ -131,7 +131,8 @@ async function getOpenCodeAuth(): Promise<AnthropicAuth | null> {
 async function resolveAnthropicAuth(): Promise<AnthropicAuth | null> {
   const envKey = process.env.ANTHROPIC_API_KEY
   if (envKey) return { token: envKey, isOAuth: envKey.startsWith('sk-ant-oat') }
-  const claudeToken = getValidClaudeToken()
+  // Use async version — auto-refreshes expired token via refresh_token
+  const claudeToken = await getValidClaudeTokenAsync()
   if (claudeToken) return { token: claudeToken, isOAuth: true }
   return getOpenCodeAuth()
 }

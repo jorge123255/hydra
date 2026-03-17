@@ -103,16 +103,102 @@ export function isClaudeOAuthAvailable(): boolean {
   return readClaudeOAuthCreds() !== null
 }
 
-/** Get a valid access token, or null if expired/unavailable */
-export function getValidClaudeToken(): string | null {
+const TOKEN_URL   = 'https://console.anthropic.com/v1/oauth/token'
+const CLIENT_ID   = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
+
+/** Refresh the OAuth access token using the stored refresh_token */
+async function refreshToken(refreshToken: string): Promise<ClaudeOAuthCreds | null> {
+  try {
+    const res = await fetch(TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'refresh_token',
+        client_id: CLIENT_ID,
+        refresh_token: refreshToken,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      log.warn(`Claude token refresh failed (${res.status}): ${body.slice(0, 200)}`)
+      return null
+    }
+    const data = (await res.json()) as any
+    const accessToken: string = data.access_token
+    const newRefreshToken: string = data.refresh_token ?? refreshToken
+    const expiresAt = Date.now() + (data.expires_in ?? 3600) * 1000
+    if (!accessToken) return null
+
+    const refreshed: ClaudeOAuthCreds = { accessToken, refreshToken: newRefreshToken, expiresAt }
+
+    // Persist back to all credential stores
+    _cached = { creds: refreshed, readAt: Date.now() }
+    persistRefreshedToken(refreshed)
+    log.info(`Claude OAuth token auto-refreshed (expires ${new Date(expiresAt).toISOString()})`)
+    return refreshed
+  } catch (e) {
+    log.warn(`Claude token refresh error: ${e}`)
+    return null
+  }
+}
+
+/** Write refreshed token back to credential files */
+function persistRefreshedToken(creds: ClaudeOAuthCreds): void {
+  try {
+    // Update synced file
+    const credDir = path.join(os.homedir(), '.hydra', 'credentials')
+    fs.mkdirSync(credDir, { recursive: true })
+    const payload = {
+      claudeAiOauth: {
+        accessToken: creds.accessToken,
+        refreshToken: creds.refreshToken,
+        expiresAt: creds.expiresAt,
+      }
+    }
+    fs.writeFileSync(SYNCED_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 })
+    // Also update ~/.claude/.credentials.json if it exists
+    if (fs.existsSync(CREDENTIALS_FILE)) {
+      let existing: Record<string, unknown> = {}
+      try { existing = JSON.parse(fs.readFileSync(CREDENTIALS_FILE, 'utf8')) } catch {}
+      existing.claudeAiOauth = payload.claudeAiOauth
+      fs.writeFileSync(CREDENTIALS_FILE, JSON.stringify(existing, null, 2), { mode: 0o600 })
+    }
+  } catch (e) {
+    log.warn(`Could not persist refreshed token: ${e}`)
+  }
+}
+
+let _refreshing: Promise<ClaudeOAuthCreds | null> | null = null
+
+/** Get a valid access token — auto-refreshes using refresh_token if expired */
+export async function getValidClaudeTokenAsync(): Promise<string | null> {
   const creds = readClaudeOAuthCreds()
   if (!creds) return null
 
-  // Allow 60s buffer
-  if (creds.expiresAt - Date.now() < 60_000) {
-    log.warn('Claude OAuth token expired — open Claude Code to refresh it')
+  // Still valid
+  if (creds.expiresAt - Date.now() > 60_000) return creds.accessToken
+
+  // Expired — try to refresh (deduplicate concurrent refresh calls)
+  if (!creds.refreshToken) {
+    log.warn('Claude OAuth token expired and no refresh_token — run /claude-login')
     return null
   }
 
+  if (!_refreshing) {
+    _refreshing = refreshToken(creds.refreshToken).finally(() => { _refreshing = null })
+  }
+  const refreshed = await _refreshing
+  return refreshed?.accessToken ?? null
+}
+
+/** Synchronous version — returns null if expired (use async version for auto-refresh) */
+export function getValidClaudeToken(): string | null {
+  const creds = readClaudeOAuthCreds()
+  if (!creds) return null
+  if (creds.expiresAt - Date.now() < 60_000) {
+    log.warn('Claude OAuth token expired — auto-refresh pending (use getValidClaudeTokenAsync)')
+    return null
+  }
   return creds.accessToken
 }
