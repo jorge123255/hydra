@@ -70,31 +70,27 @@ function getRecentGitLog(): string {
 
 const REVIEW_SYSTEM = `You are agent_smith, reviewing your own source code to find improvements.
 
-You have full permission to:
-- Fix bugs you find
-- Improve error handling
-- Simplify overly complex code
-- Add missing features that seem obviously useful
-- Improve logging/debugging
-- Fix anything that seems fragile
+You have full permission to fix bugs, improve error handling, simplify code, add missing features, improve logging.
 
-HOW TO MAKE CHANGES:
-When you want to edit a file, use this exact format — a FILE block with the complete new file content:
+HOW TO MAKE CHANGES — use REPLACE blocks (NOT full file rewrites):
 
-<<<FILE: packages/gateway/src/some-file.ts>>>
-// complete new file content here
-// must be the ENTIRE file, not a partial
-<<<END_FILE>>>
+<<<REPLACE: packages/gateway/src/some-file.ts>>>
+FIND:
+exact existing code to find (must match exactly, 3-10 lines)
+REPLACE_WITH:
+new code to put in its place
+<<<END_REPLACE>>>
 
-If you made changes that require a daemon restart to take effect, add <<<RESTART>>> at the end.
+You can include multiple REPLACE blocks for multiple changes.
+If a change requires a daemon restart, add <<<RESTART>>> at the end.
 
 RULES:
-- Only change things you are confident about
-- Make at most 1-2 focused improvements per review
-- If the code looks good, say so and do NOT include any FILE blocks
-- Always explain what you changed and why BEFORE the FILE block
-- Write the COMPLETE file content in the FILE block — not a diff, not a snippet
-- Do NOT add FILE blocks unless you are actually making a change`
+- The FIND section must be exact text that exists in the file — copy it precisely
+- Keep FIND sections short (3-10 lines) — just enough to be unique in the file
+- If the code looks good, say so and include NO REPLACE blocks
+- Explain what you changed and why BEFORE each REPLACE block
+- Make at most 2 changes per review
+- Do NOT include REPLACE blocks unless you are certain the FIND text exists verbatim`
 
 export type ReviewResult = {
   changed: boolean
@@ -159,31 +155,40 @@ Make at most 1-2 focused improvements. If the file looks good, say so.`
     return { changed: false, summary: `Review failed: ${e}`, filesModified: [], willRestart: false }
   }
 
-  // Parse <<<FILE: path>>> blocks and <<<RESTART>>> tag
+  // Parse <<<REPLACE: path>>> blocks and <<<RESTART>>> tag
   const filesModified: string[] = []
-  const FILE_BLOCK_RE = /<<<FILE:\s*([^>]+)>>>\n([\s\S]*?)<<<END_FILE>>>/g
+  const REPLACE_BLOCK_RE = /<<<REPLACE:\s*([^>]+)>>>\s*\nFIND:\n([\s\S]*?)\nREPLACE_WITH:\n([\s\S]*?)<<<END_REPLACE>>>/g
   const RESTART_RE = /<<<RESTART>>>/i
   const shouldRestart = RESTART_RE.test(response)
-  const clean = response.replace(FILE_BLOCK_RE, '').replace(RESTART_RE, '').trim()
+  const clean = response.replace(REPLACE_BLOCK_RE, '').replace(RESTART_RE, '').trim()
 
   let match: RegExpExecArray | null
-  FILE_BLOCK_RE.lastIndex = 0
-  while ((match = FILE_BLOCK_RE.exec(response)) !== null) {
+  REPLACE_BLOCK_RE.lastIndex = 0
+  while ((match = REPLACE_BLOCK_RE.exec(response)) !== null) {
     const filePath = match[1].trim()
-    const fileContent = match[2]
+    const findText = match[2].trim()
+    const replaceText = match[3].trim()
     const fullPath = path.join(HYDRA_DIR, filePath)
     try {
-      // Safety: only allow writes within the hydra project
       if (!fullPath.startsWith(HYDRA_DIR)) {
         log.warn(`[self-review] blocked write outside hydra dir: ${fullPath}`)
         continue
       }
-      fs.mkdirSync(path.dirname(fullPath), { recursive: true })
-      fs.writeFileSync(fullPath, fileContent)
+      if (!fs.existsSync(fullPath)) {
+        log.warn(`[self-review] file not found: ${fullPath}`)
+        continue
+      }
+      const original = fs.readFileSync(fullPath, 'utf8')
+      if (!original.includes(findText)) {
+        log.warn(`[self-review] FIND text not found in ${filePath} — skipping`)
+        continue
+      }
+      const updated = original.replace(findText, replaceText)
+      fs.writeFileSync(fullPath, updated)
       filesModified.push(filePath)
-      log.info(`[self-review] wrote ${filePath}`)
+      log.info(`[self-review] patched ${filePath}`)
     } catch (e) {
-      log.warn(`[self-review] failed to write ${filePath}: ${e}`)
+      log.warn(`[self-review] failed to patch ${filePath}: ${e}`)
     }
   }
 
