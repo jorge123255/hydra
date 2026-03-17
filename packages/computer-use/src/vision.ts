@@ -87,9 +87,34 @@ export async function analyzeScreenshot(
       const description = await callCopilotVision(creds, dataUrl, question)
       return { description, source: 'copilot' }
     }
-  } catch {
-    // Fall through to ax-tree
-  }
+  } catch {}
+
+  // Try Claude via OpenCode OAuth token (~/.local/share/opencode/auth.json)
+  try {
+    const authFile = path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json')
+    const auth = readJson<any>(authFile)
+    const oauthToken = auth?.anthropic?.access
+    if (oauthToken) {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${oauthToken}`, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'oauth-2025-04-20' },
+        body: JSON.stringify({
+          model: process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6',
+          max_tokens: 1024,
+          messages: [{ role: 'user', content: [
+            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: dataUrl.replace(/^data:image\/\w+;base64,/, '') } },
+            { type: 'text', text: question },
+          ]}],
+        }),
+        signal: AbortSignal.timeout(30000),
+      })
+      if (res.ok) {
+        const json = await res.json() as any
+        const text = json.content?.[0]?.text ?? ''
+        if (text) return { description: text, source: 'copilot' }
+      }
+    }
+  } catch {}
 
   // Fallback to ax-tree (0 tokens)
   const summary = await getScreenSummary()
