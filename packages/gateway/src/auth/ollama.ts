@@ -42,7 +42,7 @@ function getAuthHeaders(): Record<string, string> {
 /** Default model — nemotron-3-super:120b on cloud, nemotron-mini locally */
 export function getOllamaModel(): string {
   if (process.env.HYDRA_OLLAMA_MODEL) return process.env.HYDRA_OLLAMA_MODEL
-  return isOllamaCloud() ? 'qwen3:14b' : 'qwen3:8b'
+  return isOllamaCloud() ? 'nemotron-3-super' : 'ministral-3:8b'
 }
 
 let _availableCache: { models: string[]; checkedAt: number } | null = null

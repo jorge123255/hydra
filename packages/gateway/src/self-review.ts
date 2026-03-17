@@ -295,7 +295,7 @@ Make at most 1-2 focused improvements. If the file looks good, say so.${instruct
     } else {
       log.info('[self-review] stage 1: analyzing with nemotron-3-super')
       try {
-        analysis = await callOllama(analyzePrompt, ANALYZE_SYSTEM, 'qwen3:32b')
+        analysis = await callOllama(analyzePrompt, ANALYZE_SYSTEM, 'nemotron-3-super')
         log.info(`[self-review] nemotron analysis: ${analysis.slice(0, 120).replace(/\n/g, ' ')}`)
       } catch (e) {
         log.warn(`[self-review] nemotron analysis failed (${e}) — skipping`)
@@ -309,7 +309,7 @@ Make at most 1-2 focused improvements. If the file looks good, say so.${instruct
 
     log.info('[self-review] stage 2: implementing with devstral-2:123b')
     try {
-      response = await callOllama(implementPrompt, REVIEW_SYSTEM, 'qwen3:14b')
+      response = await callOllama(implementPrompt, REVIEW_SYSTEM, 'devstral-2:123b')
     } catch (devstralErr) {
       log.warn(`[self-review] devstral failed (${devstralErr}) — trying claude`)
       try {
