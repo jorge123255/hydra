@@ -9,6 +9,7 @@ export const OLLAMA_INTENT_MODELS: Record<string, string> = {
   research: 'nemotron-3-super',     // 120B MoE, 256K context
   reason:   'deepseek-v3.2',        // deep reasoning / hard problems
   chat:     'nemotron-3-super',     // default for general chat via Ollama
+  vision:   'llava-v1.6',           // vision model for image understanding
 }
 
 const CODE_PATTERNS = [
@@ -72,7 +73,7 @@ export function getOllamaModelForIntent(intent: Intent): string | undefined {
   return OLLAMA_INTENT_MODELS[intent]
 }
 
-/** Strip leading /fast /code /computer /research /reason /deep prefix */
+/** Strip leading intent prefix (/fast, /code, /computer, /research, /reason, /deep, /chat, /vision) */
 export function stripIntentPrefix(text: string): string {
-  return text.replace(/^\/(?:fast|code|computer|research|reason|deep)\s*/i, '').trim()
+  return text.replace(/^\/(?:fast|code|computer|research|reason|deep|chat|vision)\s*/i, '').trim()
 }
