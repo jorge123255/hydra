@@ -61,6 +61,9 @@ import {
   addKeyToPool,
   callSubagentsParallel,
   isCodexPoolConfigured,
+  startDeviceFlow,
+  pollForToken,
+  saveOAuthAccount,
 } from "./auth/codex-pool.js";
 import { ensureWorkspaceFiles, readWorkspaceFiles } from "./workspace.js";
 import { HeartbeatManager, HEARTBEAT_PROMPT } from "./heartbeat.js";
