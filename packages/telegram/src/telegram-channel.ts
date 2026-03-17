@@ -128,6 +128,10 @@ export class TelegramChannel extends BaseChannel {
       { command: "chatgpt_status", description: "ChatGPT pool status" },
       { command: "providers",      description: "Show all AI providers and routing" },
       { command: "ollama_pull",    description: "Pull an Ollama model (e.g. nemotron-mini)" },
+      { command: "stats",          description: "Execution metrics — call counts, latency, success rate" },
+      { command: "health",         description: "Check health of all AI providers" },
+      { command: "review",         description: "Trigger self-code-review and improvement" },
+      { command: "review_stats",   description: "Show self-review history" },
     ]).catch(() => {});
 
     if (this.config.webhookUrl) {
