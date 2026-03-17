@@ -131,6 +131,7 @@ const CMD_CHATGPT = /^\/chatgpt[-_]login(?:\s+(.+))?$/i;
 const CMD_CHATGPT_STATUS = /^\/chatgpt[-_]status$/i;
 const CMD_CHATGPT_ACCOUNTS = /^\/chatgpt[-_]accounts$/i;
 const CMD_CHATGPT_REMOVE = /^\/chatgpt[-_]remove\s+(\S+)/i;
+const CMD_CHATGPT_TOKEN = /^\/chatgpt[-_]token\s+(\S+)\s+(\S+)(?:\s+(\S+))?/i;
 const CMD_CHATGPT_KEY = /^\/chatgpt[-_](?:login|key)\s+(\S+)\s+(sk-\S+)/i;
 const CMD_COPILOT_STATUS = /^\/copilot[-_]status$/i;
 const CMD_CLAUDE_STATUS = /^\/claude[-_]status$/i;
@@ -649,7 +650,7 @@ ${report}` }).catch(() => {});
       return;
     }
 
-    // /chatgpt_login with no key — OAuth device flow
+    // /chatgpt_login — show Mac terminal script (Cloudflare blocks server-side auth)
     const chatgptLoginMatch = CMD_CHATGPT.exec(text);
     if (chatgptLoginMatch) {
       if (!this.isOwner(message.channelId, message.senderId)) {
@@ -657,35 +658,39 @@ ${report}` }).catch(() => {});
         return;
       }
       const label = chatgptLoginMatch[1]?.trim() || "account1";
-      await channel.send({ threadId: message.threadId, text: `Starting ChatGPT OAuth login for "${label}"...` });
-      try {
-        const deviceResp = await startDeviceFlow();
-        await channel.send({
-          threadId: message.threadId,
-          text: `*ChatGPT Login*
-
-1. Open this URL:
-${deviceResp.verification_uri}
-
-2. Enter code: \`${deviceResp.user_code}\`
-
-Waiting up to 15 minutes...`,
-        });
-        const tokens = await pollForToken(deviceResp.device_code, deviceResp.interval, 900);
-        if (!tokens) {
-          await channel.send({ threadId: message.threadId, text: "Login timed out. Run /chatgpt_login again." });
-          return;
-        }
-        saveOAuthAccount(label, tokens);
-        const accounts = listPoolAccounts();
-        await channel.send({ threadId: message.threadId, text: `✅ ChatGPT "${label}" connected via OAuth! Pool: ${accounts.length} account(s).` });
-      } catch (e) {
-        await channel.send({ threadId: message.threadId, text: `OAuth failed: ${e}
-
-Fallback: /chatgpt_login ${label} sk-proj-...` });
-      }
+      const script = [
+        "node --input-type=module << 'EOF'",
+        "const r1=await fetch('https://auth.openai.com/codex/device',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'client_id=app_EMoamEEZ73f0CkXaXp7hrann&scope=openid+profile+email+offline_access'});",
+        "const d=await r1.json();",
+        "console.log('Visit: '+d.verification_uri+'  Code: '+d.user_code);",
+        "console.log('Press Enter after approving...');",
+        "await new Promise(r=>process.stdin.once('data',r));",
+        "let t={};for(let i=0;i<30;i++){await new Promise(r=>setTimeout(r,3000));const r2=await fetch('https://auth.openai.com/oauth/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'client_id=app_EMoamEEZ73f0CkXaXp7hrann&grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code='+d.device_code});t=await r2.json();if(t.access_token)break;}",
+        `if(t.access_token){console.log('/chatgpt_token ${label} '+t.access_token+(t.refresh_token?' '+t.refresh_token:''));}else{console.log('Error:',t.error);}`,
+        "EOF",
+      ].join("\n");
+      await channel.send({
+        threadId: message.threadId,
+        text: `ChatGPT OAuth for "${label}"\n\nRun this in your Mac terminal, then paste the /chatgpt_token command it prints:\n\n\`\`\`\n${script}\n\`\`\``,
+      });
       return;
     }
+
+    // /chatgpt_token label <accessToken> [refreshToken] — save token from Mac auth script
+    const CMD_CHATGPT_TOKEN_RE = /^\/chatgpt[-_]token\s+(\S+)\s+(\S+)(?:\s+(\S+))?/i;
+    const chatgptTokenMatch = CMD_CHATGPT_TOKEN_RE.exec(text);
+    if (chatgptTokenMatch) {
+      if (!this.isOwner(message.channelId, message.senderId)) {
+        await channel.send({ threadId: message.threadId, text: "Only the bot owner can add ChatGPT accounts." });
+        return;
+      }
+      const [, tLabel, accessToken, refreshToken] = chatgptTokenMatch;
+      saveOAuthAccount(tLabel, { accessToken, refreshToken, expiresAt: Date.now() + 3600 * 1000 });
+      const accounts = listPoolAccounts();
+      await channel.send({ threadId: message.threadId, text: `✅ ChatGPT "${tLabel}" connected! Pool: ${accounts.length} account(s).` });
+      return;
+    }
+
 
     if (CMD_CHATGPT_STATUS.test(text)) {
       if (isCodexConfigured()) {
