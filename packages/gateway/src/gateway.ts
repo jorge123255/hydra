@@ -30,6 +30,7 @@ import {
   listPendingRequests,
 } from "./pairing.js";
 import { classifyIntent, stripIntentPrefix, getOllamaModelForIntent } from "./router.js";
+import { shouldRunCritic, runCriticPipeline, resolveConsultTags } from "./multi-agent.js";
 import {
   isCopilotConfigured,
   isClaudeConfigured,
@@ -429,6 +430,9 @@ ${report}` }).catch(() => {});
         result = result.replace(match[0], `[computer error: ${e}]`);
       }
     }
+
+    // Resolve [CONSULT: model: question] tags — one agent asks another
+    text = await resolveConsultTags(text)
 
     // Run [SUBAGENT: task1 | task2 | task3] fan-outs
     // Each task is classified and routed to the best model automatically.
@@ -1447,6 +1451,7 @@ ${conf}` : getStatsSummary() });
 
     const rawPrompt = overridePrompt ?? message.text;
     const intent = classifyIntent(rawPrompt, !!message.images?.length);
+    (message as any)._intent = intent;  // passed to runDirectChat critic pipeline
     const prompt = stripIntentPrefix(rawPrompt);
     const ollamaModel = getOllamaModelForIntent(intent);
 
@@ -1694,6 +1699,20 @@ ${conf}` : getStatsSummary() });
         const errMsg = String(_err);
         logCall({ ts: new Date().toISOString(), model: ollamaModel ?? "unknown", provider: ollamaModel ? "ollama" : "claude", route: "chat", latencyMs: Date.now() - _t0, success: false, errorType: errMsg.includes("timeout") || errMsg.includes("AbortError") ? "timeout" : errMsg.includes("401") || errMsg.includes("auth") ? "auth" : "other", channel: message.channelId });
         throw _err;
+      }
+
+      // Multi-agent critic pipeline for substantive responses
+      const intent = (message as any)._intent ?? 'chat'
+      if (shouldRunCritic(prompt, text, intent)) {
+        try {
+          const collab = await runCriticPipeline(prompt, text, intent)
+          if (collab.revised) {
+            log.info(`[multi-agent] revised by critic (${collab.turns.length} turns)`)
+            text = collab.finalResponse
+          }
+        } catch (criticErr) {
+          log.warn(`[multi-agent] critic pipeline failed: ${criticErr}`)
+        }
       }
 
       // Strip [SAVE:...] tags and persist them

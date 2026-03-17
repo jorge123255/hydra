@@ -345,7 +345,7 @@ function defaultSystemPrompt(): string {
 import { classifyIntent, getOllamaModelForIntent } from './router.js'
 
 // Known available models the agent can route to by name
-const MODEL_ALIASES: Record<string, string> = {
+export const MODEL_ALIASES_MAP: Record<string, string> = {
   'devstral': 'devstral-2:123b',        // coding specialist
   'nemotron': 'nemotron-3-super',        // reasoning/analysis
   'deepseek': 'deepseek-v3.2',           // deep reasoning
@@ -373,9 +373,9 @@ export async function callSmartSubagent(rawTask: string): Promise<SubagentResult
 
   if (modelRouteMatch) {
     const candidate = modelRouteMatch[1].toLowerCase()
-    const fullName = MODEL_ALIASES[candidate] ?? (
+    const fullName = MODEL_ALIASES_MAP[candidate] ?? (
       // Accept full model names like "devstral-2:123b"
-      Object.values(MODEL_ALIASES).includes(modelRouteMatch[1]) ? modelRouteMatch[1] : null
+      Object.values(MODEL_ALIASES_MAP).includes(modelRouteMatch[1]) ? modelRouteMatch[1] : null
     )
     if (fullName) {
       // Agent explicitly chose a model — honor it
