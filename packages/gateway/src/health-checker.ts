@@ -62,29 +62,30 @@ async function checkOllamaCloud(): Promise<ToolHealth> {
 }
 
 async function checkClaudeAuth(): Promise<ToolHealth> {
+  // Check direct API key first
+  if (process.env.ANTHROPIC_API_KEY) {
+    return { name: 'claude-auth', status: 'ok', lastChecked: new Date().toISOString(), note: 'API key set' }
+  }
   const authFile = path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json')
   if (!fs.existsSync(authFile)) {
-    return { name: 'claude-auth', status: 'unknown', lastChecked: new Date().toISOString(), note: 'auth.json not found' }
+    return { name: 'claude-auth', status: 'down', lastChecked: new Date().toISOString(), note: 'No API key and auth.json not found' }
   }
   try {
     const auth = JSON.parse(fs.readFileSync(authFile, 'utf8'))
-    // Find anthropic provider
-    const anthropic = auth?.providers?.find?.((p: any) => p.type === 'anthropic') ||
-                      (auth?.provider === 'anthropic' ? auth : null) ||
-                      auth?.anthropic
-    if (!anthropic) {
-      return { name: 'claude-auth', status: 'unknown', lastChecked: new Date().toISOString(), note: 'No Anthropic provider in auth.json' }
+    // Format: { anthropic: { type, access, refresh, expires } }
+    const a = auth?.anthropic
+    if (!a) {
+      return { name: 'claude-auth', status: 'down', lastChecked: new Date().toISOString(), error: 'No anthropic key in auth.json' }
     }
-    const token = anthropic.accessToken || anthropic.token
-    const expiresAt = anthropic.expiresAt || anthropic.expires_at
+    const token = a.access || a.accessToken || a.token
+    const expiresMs = a.expires || a.expiresAt
     if (!token) {
-      return { name: 'claude-auth', status: 'down', lastChecked: new Date().toISOString(), error: 'No token' }
+      return { name: 'claude-auth', status: 'down', lastChecked: new Date().toISOString(), error: 'No access token' }
     }
-    if (expiresAt) {
-      const expiresMs = new Date(expiresAt).getTime()
-      const minsLeft = Math.round((expiresMs - Date.now()) / 60000)
+    if (expiresMs) {
+      const minsLeft = Math.round((Number(expiresMs) - Date.now()) / 60000)
       if (minsLeft < 0) {
-        const hasRefresh = !!(anthropic.refreshToken || anthropic.refresh_token)
+        const hasRefresh = !!(a.refresh || a.refreshToken)
         return {
           name: 'claude-auth',
           status: hasRefresh ? 'degraded' : 'down',
@@ -93,9 +94,10 @@ async function checkClaudeAuth(): Promise<ToolHealth> {
           note: hasRefresh ? 'Refresh token present — will auto-renew' : 'No refresh token',
         }
       }
-      return { name: 'claude-auth', status: 'ok', lastChecked: new Date().toISOString(), note: `Expires in ${minsLeft}min` }
+      const daysLeft = Math.round(minsLeft / 1440)
+      return { name: 'claude-auth', status: 'ok', lastChecked: new Date().toISOString(), note: `OAuth token valid, expires in ${daysLeft > 1 ? daysLeft + 'd' : minsLeft + 'min'}` }
     }
-    return { name: 'claude-auth', status: 'ok', lastChecked: new Date().toISOString(), note: 'Token present (no expiry info)' }
+    return { name: 'claude-auth', status: 'ok', lastChecked: new Date().toISOString(), note: 'OAuth token present' }
   } catch (e: any) {
     return { name: 'claude-auth', status: 'unknown', lastChecked: new Date().toISOString(), error: e.message?.slice(0, 80) }
   }
@@ -143,14 +145,18 @@ async function checkChatGPTPool(): Promise<ToolHealth> {
 }
 
 async function checkOpenCode(): Promise<ToolHealth> {
-  const start = Date.now()
+  // OpenCode starts on-demand per session — check if binary is available instead
+  const { execSync } = await import('child_process')
   try {
-    const res = await fetch('http://localhost:7777/health', { signal: AbortSignal.timeout(3000) })
-    const latencyMs = Date.now() - start
-    if (res.ok) return { name: 'opencode', status: 'ok', lastChecked: new Date().toISOString(), latencyMs }
-    return { name: 'opencode', status: 'degraded', lastChecked: new Date().toISOString(), latencyMs, error: `HTTP ${res.status}` }
+    execSync('which opencode', { stdio: 'ignore' })
+    return { name: 'opencode', status: 'ok', lastChecked: new Date().toISOString(), note: 'Binary available (on-demand)' }
   } catch {
-    return { name: 'opencode', status: 'down', lastChecked: new Date().toISOString(), note: 'Server not running' }
+    try {
+      execSync('npx opencode --version', { stdio: 'ignore', timeout: 5000 })
+      return { name: 'opencode', status: 'ok', lastChecked: new Date().toISOString(), note: 'Available via npx (on-demand)' }
+    } catch {
+      return { name: 'opencode', status: 'degraded', lastChecked: new Date().toISOString(), note: 'Binary not found in PATH — sessions may fail' }
+    }
   }
 }
 
