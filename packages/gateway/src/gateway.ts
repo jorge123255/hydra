@@ -649,7 +649,7 @@ ${report}` }).catch(() => {});
       return;
     }
 
-    // /chatgpt_login with no key — show instructions
+    // /chatgpt_login with no key — OAuth device flow
     const chatgptLoginMatch = CMD_CHATGPT.exec(text);
     if (chatgptLoginMatch) {
       if (!this.isOwner(message.channelId, message.senderId)) {
@@ -657,10 +657,33 @@ ${report}` }).catch(() => {});
         return;
       }
       const label = chatgptLoginMatch[1]?.trim() || "account1";
-      await channel.send({
-        threadId: message.threadId,
-        text: `To add ChatGPT subagent "${label}":\n\n1. Go to https://platform.openai.com/api-keys\n2. Create a new secret key\n3. Run: /chatgpt_login ${label} sk-proj-...\n\nEach account becomes a parallel subagent Claude can delegate tasks to.`,
-      });
+      await channel.send({ threadId: message.threadId, text: `Starting ChatGPT OAuth login for "${label}"...` });
+      try {
+        const deviceResp = await startDeviceFlow();
+        await channel.send({
+          threadId: message.threadId,
+          text: `*ChatGPT Login*
+
+1. Open this URL:
+${deviceResp.verification_uri}
+
+2. Enter code: \`${deviceResp.user_code}\`
+
+Waiting up to 15 minutes...`,
+        });
+        const tokens = await pollForToken(deviceResp.device_code, deviceResp.interval, 900);
+        if (!tokens) {
+          await channel.send({ threadId: message.threadId, text: "Login timed out. Run /chatgpt_login again." });
+          return;
+        }
+        saveOAuthAccount(label, tokens);
+        const accounts = listPoolAccounts();
+        await channel.send({ threadId: message.threadId, text: `✅ ChatGPT "${label}" connected via OAuth! Pool: ${accounts.length} account(s).` });
+      } catch (e) {
+        await channel.send({ threadId: message.threadId, text: `OAuth failed: ${e}
+
+Fallback: /chatgpt_login ${label} sk-proj-...` });
+      }
       return;
     }
 
