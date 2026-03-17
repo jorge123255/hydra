@@ -183,6 +183,20 @@ Make at most 1-2 focused improvements. If the file looks good, say so.`
 
   const changed = filesModified.length > 0
 
+  // Push improvements to GitHub
+  if (changed) {
+    try {
+      const commitMsg = `self-improve: ${targetFile.split('/').pop()} — ${shortSummary.slice(0, 80)}`
+      execSync(
+        `cd ${HYDRA_DIR} && git add -A && git commit -m ${JSON.stringify(commitMsg)} && git push`,
+        { encoding: 'utf8', timeout: 30_000 }
+      )
+      log.info(`[self-review] pushed improvements to GitHub`)
+    } catch (e) {
+      log.warn(`[self-review] git push failed: ${e}`)
+    }
+  }
+
   return {
     changed,
     summary: changed
