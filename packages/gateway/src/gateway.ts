@@ -739,14 +739,20 @@ export class Gateway {
         "o3-mini",
       ];
       const OLLAMA_MODELS = [
-        "nemotron-3-super",   // 120B MoE, 12B active, 256K ctx — research
-        "devstral-2:123b",    // 123B — coding specialist
-        "deepseek-v3.2",      // deep reasoning
-        "gpt-oss:120b",       // OpenAI open-source 120B
-        "qwen3-next:80b",     // 80B — fast + smart
-        "mistral-large-3:675b", // 675B — most capable
-        "nemotron-3-nano:30b", // 30B — fast
-        "nemotron-mini",      // local only
+        "nemotron-3-super",      // 120B MoE, 12B active, 256K ctx — research
+        "devstral-2:123b",       // 123B — coding specialist
+        "devstral-small-2:24b",  // 24B — fast coding
+        "deepseek-v3.2",         // deep reasoning
+        "deepseek-v3.1:671b",    // 671B deepseek
+        "gpt-oss:120b",          // OpenAI open-source 120B (codex)
+        "gpt-oss:20b",           // OpenAI open-source 20B (codex, fast)
+        "qwen3-next:80b",        // 80B — fast + smart
+        "qwen3-coder:480b",      // 480B coding model
+        "mistral-large-3:675b",  // 675B — most capable
+        "kimi-k2:1t",            // 1T params — hardest problems
+        "cogito-2.1:671b",       // 671B reasoning
+        "nemotron-3-nano:30b",   // 30B — fast
+        "nemotron-mini",         // local only
       ];
       const usingCopilot = isCopilotConfigured() && !isClaudeConfigured();
       const currentClaude = process.env.HYDRA_CLAUDE_MODEL ?? (usingCopilot ? "claude-sonnet-4.6" : "claude-sonnet-4-6");
