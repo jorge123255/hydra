@@ -95,7 +95,7 @@ export async function callOllama(
   messages.push({ role: 'user', content: prompt })
 
   const controller = new AbortController()
-  const timeoutMs = isOllamaCloud() ? 60_000 : 120_000
+  const timeoutMs = isOllamaCloud() ? 180_000 : 120_000
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
   log.debug(`[ollama] ${isOllamaCloud() ? 'cloud' : 'local'} → ${useModel}`)
