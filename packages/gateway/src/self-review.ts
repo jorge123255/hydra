@@ -219,7 +219,7 @@ Make at most 1-2 focused improvements. If the file looks good, say so.`
   return {
     changed,
     summary: changed
-      ? `Reviewed \`${targetFile}\`:\n${clean.slice(0, 800)}`
+      ? `Reviewed \`${targetFile}\`:\n${clean.slice(0, 3000)}`
       : `Reviewed \`${targetFile}\` — looks good, no changes needed.`,
     filesModified,
     willRestart: shouldRestart && changed,

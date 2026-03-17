@@ -218,7 +218,7 @@ export class Gateway {
           const [channelId, senderId] = ownerId.split(":");
           const channel = this.registry.get(channelId as any);
           if (!channel) continue;
-          const msg = `🤖 Self-review complete — I improved myself:\n\n${result.summary}${result.willRestart ? "\n\n♻️ Restarting to apply changes..." : ""}`;
+          const msg = `🤖 Self-review complete — I improved myself:\n\n${result.summary}${result.willRestart ? "\n\n♻️ Restarting to apply changes..." : ""}`.slice(0, 3800);
           await channel.send({ threadId: senderId, text: msg }).catch(() => {});
         }
       } catch (e) {
@@ -1033,8 +1033,8 @@ export class Gateway {
       await channel.send({ threadId: message.threadId, text: "🔍 Starting self-review..." });
       const result = await runSelfReview(session.workdir);
       const msg = result.changed
-        ? `✅ Self-review complete — ${result.filesModified.length} file(s) improved${result.willRestart ? "\n♻️ Restarting to apply changes..." : ""}\n\n${result.summary}`
-        : `✅ ${result.summary}`;
+        ? `✅ Self-review complete — ${result.filesModified.length} file(s) improved${result.willRestart ? "\n♻️ Restarting to apply changes..." : ""}\n\n${result.summary}`.slice(0, 3800)
+        : `✅ ${result.summary}`.slice(0, 3800);
       await channel.send({ threadId: message.threadId, text: msg });
       return;
     }
