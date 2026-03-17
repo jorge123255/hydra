@@ -143,12 +143,12 @@ Make at most 1-2 focused improvements. If the file looks good, say so.`
         log.info('[self-review] using claude-opus-4-6')
         response = await callClaudeDirect(prompt, undefined, REVIEW_SYSTEM, 'claude-opus-4-6')
       } catch (claudeErr) {
-        log.warn(`[self-review] Claude failed (${claudeErr}) — falling back to deepseek-v3.2`)
-        response = await callOllama(prompt, REVIEW_SYSTEM, 'deepseek-v3.2')
+        log.warn(`[self-review] Claude failed (${claudeErr}) — falling back to devstral-2:123b`)
+        response = await callOllama(prompt, REVIEW_SYSTEM, 'devstral-2:123b')
       }
     } else {
-      log.info('[self-review] claude not configured — using deepseek-v3.2')
-      response = await callOllama(prompt, REVIEW_SYSTEM, 'deepseek-v3.2')
+      log.info('[self-review] claude not configured — using devstral-2:123b')
+      response = await callOllama(prompt, REVIEW_SYSTEM, 'devstral-2:123b')
     }
   } catch (e) {
     log.error(`[self-review] AI call failed: ${e}`)
