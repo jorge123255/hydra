@@ -317,10 +317,19 @@ ${report}` }).catch(() => {});
     }
     if (shouldRestart) scheduleSelfRestart();
 
+    // Strip [CONFIDENCE: N%] tag and log score
+    const { score: confScore, clean: afterConf } = extractConfidence(clean);
+    if (confScore !== null) {
+      logConfidence(confScore, "response", "ai", channelId, "");
+    }
+
+    // Extract [GOAL:] / [GOAL_DONE:] tags
+    const { clean: afterGoals } = extractGoalTags(afterConf, channelId, threadId);
+
     // Run [SUBAGENT: task1 | task2 | task3] fan-outs
     const subagentPattern = /\[SUBAGENT:\s*([^\]]+)\]/gi;
-    let result = clean;
-    const subagentMatches = [...clean.matchAll(subagentPattern)];
+    let result = afterGoals;
+    const subagentMatches = [...afterGoals.matchAll(subagentPattern)];
     for (const match of subagentMatches) {
       const tasks = match[1].split('|').map(t => t.trim()).filter(Boolean);
       if (tasks.length === 0 || !isCodexPoolConfigured()) continue;
