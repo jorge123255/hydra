@@ -78,6 +78,9 @@ import {
   buildPromptWithHistory,
   clearHistory,
 } from "./history.js";
+import { logCall } from "./metrics.js";
+import { extractFeedback, getLessonsContent } from "./lessons.js";
+import { startHealthCheckLoop, runHealthChecks, formatHealthReport, getLastHealthState } from "./health-checker.js";
 
 const log = createLogger("gateway");
 
@@ -144,6 +147,8 @@ const CMD_RESTART    = /^\/restart$/i
 const CMD_PING = /^\/ping$/i;
 const CMD_REVIEW = /^\/review$/i;
 const CMD_REVIEW_STATS = /^\/review[-_]stats$/i;
+const CMD_STATS = /^\/stats$/i;
+const CMD_HEALTH = /^\/health$/i;
 
 const NO_CREDS_MSG = [
   "No AI credentials configured.",
@@ -189,6 +194,7 @@ export class Gateway {
     this.heartbeat.start();
     this.startSelfReviewLoop();
     this.startSelfAwarenessRefresh();
+    this.startHealthCheckLoop();
     const idleMs = this.config.sessionIdleMs ?? 30 * 60 * 1000;
     this.sweepTimer = setInterval(
       () => this.sessions.sweepIdle(idleMs),
@@ -210,6 +216,19 @@ export class Gateway {
     setInterval(() => {
       if (this.selfAwarenessWorkdir) writeSelfAwareness(this.selfAwarenessWorkdir);
     }, 15 * 60 * 1000);
+  }
+
+  private startHealthCheckLoop(): void {
+    startHealthCheckLoop((report) => {
+      const ownerIds = (process.env.HYDRA_OWNER_IDS ?? "").split(",").filter(Boolean);
+      for (const ownerId of ownerIds) {
+        const [channelId, senderId] = ownerId.split(":");
+        const ch = this.registry.get(channelId as any);
+        if (!ch) continue;
+        ch.send({ threadId: senderId, text: `🏥 Health alert:
+${report}` }).catch(() => {});
+      }
+    });
   }
 
   private startSelfReviewLoop(): void {
@@ -1062,6 +1081,23 @@ export class Gateway {
       return;
     }
 
+    // Extract feedback/corrections before routing to AI
+    const prevBot = undefined; // future: pass last bot message
+    extractFeedback(message.senderId, message.channelId, text, prevBot);
+
+    if (CMD_STATS.test(text)) {
+      const { getStatsSummary } = await import("./metrics.js");
+      await channel.send({ threadId: message.threadId, text: getStatsSummary() });
+      return;
+    }
+
+    if (CMD_HEALTH.test(text)) {
+      await channel.send({ threadId: message.threadId, text: "🔍 Running health checks..." });
+      const tools = await runHealthChecks();
+      await channel.send({ threadId: message.threadId, text: formatHealthReport(tools) });
+      return;
+    }
+
     await this.runAgentMessage(message);
   }
 
@@ -1083,6 +1119,12 @@ export class Gateway {
     await this.sessions.ensureWorktree(session);
 
     this.selfAwarenessWorkdir = session.workdir;
+    // Inject LESSONS.md so AI sees accumulated lessons
+    try {
+      const lessonsContent = getLessonsContent();
+      const lessonsPath = path.join(session.workdir, "LESSONS.md");
+      fs.writeFileSync(lessonsPath, lessonsContent);
+    } catch {}
     ensureWorkspaceFiles(session.workdir, {
       channelId: message.channelId,
       senderId: message.senderId,
@@ -1254,23 +1296,32 @@ export class Gateway {
         }
       }, 10_000);
 
-      const result = await runSession({
-        sessionId: session.opencodeSessionId,
-        directory: session.workdir,
-        prompt: fullPrompt,
-        images: message.images,
-        signal: ctrl.signal,
-        onChunk: async (text) => {
-          accumulated = text;
-          const now = Date.now();
-          if (placeholderId && now - lastEditAt > 800) {
-            await channel
-              .editMessage(message.threadId, placeholderId, accumulated + " ▋")
-              .catch(() => {});
-            lastEditAt = now;
-          }
-        },
-      });
+      const _oc_t0 = Date.now();
+      let result: Awaited<ReturnType<typeof runSession>>;
+      try {
+        result = await runSession({
+          sessionId: session.opencodeSessionId,
+          directory: session.workdir,
+          prompt: fullPrompt,
+          images: message.images,
+          signal: ctrl.signal,
+          onChunk: async (text) => {
+            accumulated = text;
+            const now = Date.now();
+            if (placeholderId && now - lastEditAt > 800) {
+              await channel
+                .editMessage(message.threadId, placeholderId, accumulated + " ▋")
+                .catch(() => {});
+              lastEditAt = now;
+            }
+          },
+        });
+        logCall({ ts: new Date().toISOString(), model: "opencode", provider: "opencode", route: intent, latencyMs: Date.now() - _oc_t0, success: !result.error, errorType: result.error ? "other" : undefined, channel: message.channelId });
+      } catch (_ocErr: any) {
+        clearInterval(taskTicker);
+        logCall({ ts: new Date().toISOString(), model: "opencode", provider: "opencode", route: intent, latencyMs: Date.now() - _oc_t0, success: false, errorType: String(_ocErr).includes("timeout") || String(_ocErr).includes("AbortError") ? "timeout" : "other", channel: message.channelId });
+        throw _ocErr;
+      }
 
       clearInterval(taskTicker);
       session.opencodeSessionId = result.sessionId;
@@ -1359,7 +1410,16 @@ export class Gateway {
     });
     try {
       const { callDirect } = await import("./copilot-chat.js");
-      let text = await callDirect(prompt, images, systemPrompt, ollamaModel);
+      const _t0 = Date.now();
+      let text: string;
+      try {
+        text = await callDirect(prompt, images, systemPrompt, ollamaModel);
+        logCall({ ts: new Date().toISOString(), model: ollamaModel ?? process.env.HYDRA_CLAUDE_MODEL ?? "unknown", provider: ollamaModel ? "ollama" : "claude", route: "chat", latencyMs: Date.now() - _t0, success: true, channel: message.channelId });
+      } catch (_err) {
+        const errMsg = String(_err);
+        logCall({ ts: new Date().toISOString(), model: ollamaModel ?? "unknown", provider: ollamaModel ? "ollama" : "claude", route: "chat", latencyMs: Date.now() - _t0, success: false, errorType: errMsg.includes("timeout") || errMsg.includes("AbortError") ? "timeout" : errMsg.includes("401") || errMsg.includes("auth") ? "auth" : "other", channel: message.channelId });
+        throw _err;
+      }
 
       // Strip [SAVE:...] tags and persist them
       text = await this.processAiResponse(
