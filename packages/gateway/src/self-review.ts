@@ -13,7 +13,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { execSync } from 'node:child_process'
 import { createLogger } from './logger.js'
-import { parseSaveTags, applySaveTag, scheduleSelfRestart } from './self-update.js'
+import { scheduleSelfRestart } from './self-update.js'
 
 const log = createLogger('self-review')
 
@@ -79,17 +79,22 @@ You have full permission to:
 - Fix anything that seems fragile
 
 HOW TO MAKE CHANGES:
-Use [SAVE: filepath | full-new-content] tags. Example:
-[SAVE: packages/gateway/src/some-file.ts | <new file content here>]
+When you want to edit a file, use this exact format — a FILE block with the complete new file content:
 
-If you made changes that require a restart, add [RESTART] at the end.
+<<<FILE: packages/gateway/src/some-file.ts>>>
+// complete new file content here
+// must be the ENTIRE file, not a partial
+<<<END_FILE>>>
+
+If you made changes that require a daemon restart to take effect, add <<<RESTART>>> at the end.
 
 RULES:
-- Only change things you're confident about
-- Keep changes minimal and focused — one or two improvements max per review
-- If the code looks good, say so and skip making changes
-- Always explain what you changed and why in plain English
-- Do NOT rewrite entire files — make surgical edits`
+- Only change things you are confident about
+- Make at most 1-2 focused improvements per review
+- If the code looks good, say so and do NOT include any FILE blocks
+- Always explain what you changed and why BEFORE the FILE block
+- Write the COMPLETE file content in the FILE block — not a diff, not a snippet
+- Do NOT add FILE blocks unless you are actually making a change`
 
 export type ReviewResult = {
   changed: boolean
@@ -154,17 +159,31 @@ Make at most 1-2 focused improvements. If the file looks good, say so.`
     return { changed: false, summary: `Review failed: ${e}`, filesModified: [], willRestart: false }
   }
 
-  // Apply [SAVE:] and [RESTART] tags
-  const { clean, tags, shouldRestart } = parseSaveTags(response)
+  // Parse <<<FILE: path>>> blocks and <<<RESTART>>> tag
   const filesModified: string[] = []
+  const FILE_BLOCK_RE = /<<<FILE:\s*([^>]+)>>>\n([\s\S]*?)<<<END_FILE>>>/g
+  const RESTART_RE = /<<<RESTART>>>/i
+  const shouldRestart = RESTART_RE.test(response)
+  const clean = response.replace(FILE_BLOCK_RE, '').replace(RESTART_RE, '').trim()
 
-  for (const tag of tags) {
+  let match: RegExpExecArray | null
+  FILE_BLOCK_RE.lastIndex = 0
+  while ((match = FILE_BLOCK_RE.exec(response)) !== null) {
+    const filePath = match[1].trim()
+    const fileContent = match[2]
+    const fullPath = path.join(HYDRA_DIR, filePath)
     try {
-      applySaveTag(tag, workdir, 'self-review', 'self-review')
-      filesModified.push(tag.key)
-      log.info(`[self-review] applied save: ${tag.key}`)
+      // Safety: only allow writes within the hydra project
+      if (!fullPath.startsWith(HYDRA_DIR)) {
+        log.warn(`[self-review] blocked write outside hydra dir: ${fullPath}`)
+        continue
+      }
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true })
+      fs.writeFileSync(fullPath, fileContent)
+      filesModified.push(filePath)
+      log.info(`[self-review] wrote ${filePath}`)
     } catch (e) {
-      log.warn(`[self-review] failed to apply save tag: ${e}`)
+      log.warn(`[self-review] failed to write ${filePath}: ${e}`)
     }
   }
 
