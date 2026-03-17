@@ -54,6 +54,7 @@ import {
 } from "./worktree-manager.js";
 import { buildSystemPrompt, NO_REPLY, HEARTBEAT_OK } from "./system-prompt.js";
 import { runSelfReview, getReviewStats } from "./self-review.js";
+import { writeSelfAwareness } from "./self-awareness.js";
 import {
   listPoolAccounts,
   removeAccountFromPool,
@@ -187,6 +188,7 @@ export class Gateway {
     this.scheduler.start();
     this.heartbeat.start();
     this.startSelfReviewLoop();
+    this.startSelfAwarenessRefresh();
     const idleMs = this.config.sessionIdleMs ?? 30 * 60 * 1000;
     this.sweepTimer = setInterval(
       () => this.sessions.sweepIdle(idleMs),
@@ -201,6 +203,14 @@ export class Gateway {
   }
 
   private selfReviewTimer?: NodeJS.Timeout;
+
+  private selfAwarenessWorkdir?: string;
+
+  private startSelfAwarenessRefresh(): void {
+    setInterval(() => {
+      if (this.selfAwarenessWorkdir) writeSelfAwareness(this.selfAwarenessWorkdir);
+    }, 15 * 60 * 1000);
+  }
 
   private startSelfReviewLoop(): void {
     const intervalHours = parseInt(process.env.HYDRA_REVIEW_INTERVAL_HOURS ?? "6", 10);
@@ -1072,6 +1082,7 @@ export class Gateway {
 
     await this.sessions.ensureWorktree(session);
 
+    this.selfAwarenessWorkdir = session.workdir;
     ensureWorkspaceFiles(session.workdir, {
       channelId: message.channelId,
       senderId: message.senderId,

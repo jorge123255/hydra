@@ -5,6 +5,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createLogger } from './logger.js'
+import { writeSelfAwareness } from './self-awareness.js'
 import { getBotName } from './system-prompt.js'
 
 const log = createLogger('workspace')
@@ -217,7 +218,7 @@ export function ensureWorkspaceFiles(workdir: string, ctx: WorkspaceContext): vo
 
 /** Read all bootstrap files from workdir, return as filename -> content map */
 export function readWorkspaceFiles(workdir: string): Record<string, string> {
-  const filenames = ['SOUL.md', 'AGENTS.md', 'IDENTITY.md', 'USER.md', 'MEMORY.md', 'HEARTBEAT.md']
+  const filenames = ['SOUL.md', 'AGENTS.md', 'SELF.md', 'IDENTITY.md', 'USER.md', 'MEMORY.md', 'HEARTBEAT.md']
   const result: Record<string, string> = {}
   for (const filename of filenames) {
     const filePath = path.join(workdir, filename)
