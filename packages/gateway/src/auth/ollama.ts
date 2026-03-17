@@ -27,7 +27,9 @@ export function getOllamaBaseUrl(): string {
 }
 
 export function isOllamaCloud(): boolean {
-  return !!process.env.OLLAMA_CLOUD_API_KEY
+  if (process.env.OLLAMA_CLOUD_API_KEY) return true
+  const host = process.env.OLLAMA_HOST ?? ''
+  return !!host && !host.includes('localhost') && !host.includes('127.0.0.1')
 }
 
 function getAuthHeaders(): Record<string, string> {
@@ -40,7 +42,7 @@ function getAuthHeaders(): Record<string, string> {
 /** Default model — nemotron-3-super:120b on cloud, nemotron-mini locally */
 export function getOllamaModel(): string {
   if (process.env.HYDRA_OLLAMA_MODEL) return process.env.HYDRA_OLLAMA_MODEL
-  return isOllamaCloud() ? 'nemotron-3-super' : 'nemotron-mini'
+  return isOllamaCloud() ? 'qwen3:14b' : 'qwen3:8b'
 }
 
 let _availableCache: { models: string[]; checkedAt: number } | null = null
@@ -95,7 +97,7 @@ export async function callOllama(
   messages.push({ role: 'user', content: prompt })
 
   const controller = new AbortController()
-  const timeoutMs = isOllamaCloud() ? 180_000 : 120_000
+  const timeoutMs = isOllamaCloud() ? 360_000 : 180_000
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
   log.debug(`[ollama] ${isOllamaCloud() ? 'cloud' : 'local'} → ${useModel}`)

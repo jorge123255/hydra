@@ -278,7 +278,7 @@ Make at most 1-2 focused improvements. If the file looks good, say so.${instruct
   // ── 3. Two-stage pipeline ─────────────────────────────────────────────────
   let response = ''
   try {
-    const { callClaudeDirect, isClaudeConfigured, callOllama } = await import('./copilot-chat.js')
+    const { callClaudeDirect, isClaudeConfigured, callOllama, callDirect } = await import('./copilot-chat.js')
 
     // Stage 1: Analysis — identify what needs fixing (no code output)
     let analysis = ''
@@ -295,7 +295,7 @@ Make at most 1-2 focused improvements. If the file looks good, say so.${instruct
     } else {
       log.info('[self-review] stage 1: analyzing with nemotron-3-super')
       try {
-        analysis = await callOllama(analyzePrompt, ANALYZE_SYSTEM, 'nemotron-3-super')
+        analysis = await callOllama(analyzePrompt, ANALYZE_SYSTEM, 'qwen3:32b')
         log.info(`[self-review] nemotron analysis: ${analysis.slice(0, 120).replace(/\n/g, ' ')}`)
       } catch (e) {
         log.warn(`[self-review] nemotron analysis failed (${e}) — skipping`)
@@ -309,13 +309,14 @@ Make at most 1-2 focused improvements. If the file looks good, say so.${instruct
 
     log.info('[self-review] stage 2: implementing with devstral-2:123b')
     try {
-      response = await callOllama(implementPrompt, REVIEW_SYSTEM, 'devstral-2:123b')
+      response = await callOllama(implementPrompt, REVIEW_SYSTEM, 'qwen3:14b')
     } catch (devstralErr) {
-      log.warn(`[self-review] devstral failed (${devstralErr}) — falling back`)
-      if (isClaudeConfigured()) {
+      log.warn(`[self-review] devstral failed (${devstralErr}) — trying claude`)
+      try {
         response = await callClaudeDirect(implementPrompt, undefined, REVIEW_SYSTEM, 'claude-sonnet-4-6')
-      } else {
-        throw devstralErr
+      } catch (claudeErr) {
+        log.warn(`[self-review] claude failed (${claudeErr}) — falling back to ChatGPT pool`)
+        response = await callDirect(implementPrompt, undefined, REVIEW_SYSTEM)
       }
     }
   } catch (e) {

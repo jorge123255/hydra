@@ -340,10 +340,14 @@ import { classifyIntent, getOllamaModelForIntent } from './router.js'
 
 // Known available models the agent can route to by name
 const MODEL_ALIASES: Record<string, string> = {
-  'devstral': 'devstral-2:123b',
-  'nemotron': 'nemotron-3-super',
-  'deepseek': 'deepseek-v3.2',
-  'llava': 'llava-v1.6',
+  'devstral': 'qwen2.5-coder:32b-instruct-q8_0',   // best coder on Unraid
+  'nemotron': 'qwen3:32b',                           // strong reasoner
+  'deepseek': 'deepseek-r1:70b',                     // deep reasoning
+  'llava': 'qwen2.5vl:32b-q4_K_M',                  // vision
+  'coder': 'qwen2.5-coder:32b-instruct-q8_0',
+  'fast': 'qwen3:8b',
+  'smart': 'qwen3:32b',
+  'mixtral': 'mixtral:8x22b-instruct-v0.1-q4_K_M',
 }
 
 export type SubagentResult = {
