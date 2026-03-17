@@ -54,7 +54,7 @@ import {
   rollbackWorktree,
 } from "./worktree-manager.js";
 import { buildSystemPrompt, NO_REPLY, HEARTBEAT_OK } from "./system-prompt.js";
-import { runSelfReview, getReviewStats } from "./self-review.js";
+import { runSelfReview, getReviewStats, shouldRunNow } from "./self-review.js";
 import { writeSelfAwareness } from "./self-awareness.js";
 import {
   listPoolAccounts,
@@ -158,7 +158,7 @@ const CMD_OAUTH_CODE = /^\/opencode[-_]code\s+(\S+)/i;
 const CMD_PROVIDERS  = /^\/providers$/i
 const CMD_RESTART    = /^\/restart$/i
 const CMD_PING = /^\/ping$/i;
-const CMD_REVIEW = /^\/review$/i;
+const CMD_REVIEW = /^\/review(?:\s+(.+))?$/i;
 const CMD_REVIEW_STATS = /^\/review[-_]stats$/i;
 const CMD_STATS = /^\/stats$/i;
 const CMD_HEALTH = /^\/health$/i;
@@ -260,7 +260,31 @@ ${report}` }).catch(() => {});
     const intervalHours = parseInt(process.env.HYDRA_REVIEW_INTERVAL_HOURS ?? "6", 10);
     if (intervalHours <= 0) return;
     const intervalMs = intervalHours * 60 * 60 * 1000;
-    log.info(`Self-review loop: every ${intervalHours}h`);
+    log.info(`Self-review loop: every ${intervalHours}h (+ spike detection every 15m)`);
+    // Spike detection — check every 15 min if we should run early
+    let lastSpikeCheck = 0;
+    const spikeCheckMs = 15 * 60 * 1000;
+    const maybeTriggerEarly = setInterval(async () => {
+      if (Date.now() - lastSpikeCheck < spikeCheckMs) return;
+      lastSpikeCheck = Date.now();
+      const reason = shouldRunNow();
+      if (!reason) return;
+      log.info(`[self-review] early trigger: ${reason}`);
+      clearInterval(maybeTriggerEarly);
+      try {
+        const result = await runSelfReview();
+        if (!result.changed) return;
+        const ownerIds = (process.env.HYDRA_OWNER_IDS ?? "").split(",").filter(Boolean);
+        for (const ownerId of ownerIds) {
+          const [channelId, senderId] = ownerId.split(":");
+          const channel = this.registry.get(channelId as any);
+          if (!channel) continue;
+          await channel.send({ threadId: senderId, text: `🚨 Auto-review triggered (${reason}):\n\n${result.summary}`.slice(0, 3800) }).catch(() => {});
+        }
+      } catch (e) {
+        log.error(`[self-review] spike-triggered review failed: ${e}`);
+      }
+    }, 60_000); // check every minute, gate with lastSpikeCheck
     this.selfReviewTimer = setInterval(async () => {
       log.info("[self-review] scheduled review starting");
       try {
@@ -1231,10 +1255,13 @@ ${report}` }).catch(() => {});
       return;
     }
 
-    if (CMD_REVIEW.test(text)) {
+    const reviewMatch = text.match(CMD_REVIEW);
+    if (reviewMatch) {
+      const reviewInstructions = reviewMatch[1]?.trim() || undefined;
       const session = this.sessions.getOrCreate(message);
-      await channel.send({ threadId: message.threadId, text: "🔍 Starting self-review..." });
-      const result = await runSelfReview(session.workdir);
+      const hint = reviewInstructions ? ` with focus: "${reviewInstructions}"` : '';
+      await channel.send({ threadId: message.threadId, text: `🔍 Starting self-review${hint}...` });
+      const result = await runSelfReview(session.workdir, reviewInstructions);
       const msg = result.changed
         ? `✅ Self-review complete — ${result.filesModified.length} file(s) improved${result.willRestart ? "\n♻️ Restarting to apply changes..." : ""}\n\n${result.summary}`.slice(0, 3800)
         : `✅ ${result.summary}`.slice(0, 3800);

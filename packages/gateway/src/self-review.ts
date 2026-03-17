@@ -1,12 +1,14 @@
 // Self-improvement engine.
 // agent_smith periodically reviews its own source code and makes improvements.
 //
-// Runs on a schedule (default: every 6 hours) OR triggered manually via /review.
-// Reads a rotating set of source files, asks Claude/OpenCode to improve them,
-// applies [SAVE:] and [RESTART] tags from the response, then reports to the owner.
+// Improvements over v1:
+//   1. Log-driven priority — files with recent errors get reviewed first
+//   2. Rich context — LESSONS.md + recent errors injected into prompt
+//   3. Two-stage pipeline — nemotron/opus ANALYZES → devstral IMPLEMENTS
+//   4. Smart scheduling — shouldRunNow() detects error spikes / recent commits
+//   5. Runtime check — tsx --check after typecheck to catch import-time errors
 //
-// The AI is given full read/write access to its own source — same self-coding
-// loop it uses when you ask it to change itself, but running autonomously.
+// Runs on a schedule (default: every 6 hours) OR triggered manually via /review.
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -19,8 +21,10 @@ const log = createLogger('self-review')
 
 const HYDRA_DIR = '/Users/gszulc/hydra'
 const REVIEW_STATE_FILE = path.join(os.homedir(), '.hydra', 'self-review-state.json')
+const LOG_FILE = path.join(os.homedir(), '.hydra', 'logs', 'gateway.log')
+const LOG_ERR_FILE = path.join(os.homedir(), '.hydra', 'logs', 'gateway.err')
 
-// Source files to rotate through — reviewed in round-robin order
+// Source files to rotate through — reviewed in round-robin, hottest errors first
 const REVIEW_FILES = [
   'packages/gateway/src/gateway.ts',
   'packages/gateway/src/copilot-chat.ts',
@@ -38,13 +42,14 @@ type ReviewState = {
   lastFileIndex: number
   totalReviews: number
   improvements: string[]  // last 10 improvement summaries
+  lastErrorCount: number  // error count at last run (for spike detection)
 }
 
 function loadState(): ReviewState {
   try {
     return JSON.parse(fs.readFileSync(REVIEW_STATE_FILE, 'utf8'))
   } catch {
-    return { lastRunAt: '', lastFileIndex: 0, totalReviews: 0, improvements: [] }
+    return { lastRunAt: '', lastFileIndex: 0, totalReviews: 0, improvements: [], lastErrorCount: 0 }
   }
 }
 
@@ -67,6 +72,126 @@ function getRecentGitLog(): string {
     return '(git log unavailable)'
   }
 }
+
+/** Read the last N lines of a log file */
+function readLastLines(filePath: string, n = 300): string[] {
+  try {
+    if (!fs.existsSync(filePath)) return []
+    const content = fs.readFileSync(filePath, 'utf8')
+    return content.split('\n').filter(Boolean).slice(-n)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Parse recent logs to build a frequency map of which REVIEW_FILES
+ * appear most often in error/warn lines.
+ * Returns REVIEW_FILES sorted by error frequency (hottest first).
+ */
+function rankFilesByErrors(baseIndex: number): string[] {
+  const freq = new Map<string, number>()
+
+  const lines = [
+    ...readLastLines(LOG_FILE, 500),
+    ...readLastLines(LOG_ERR_FILE, 300),
+  ]
+
+  for (const line of lines) {
+    if (!/ERROR|WARN|TypeError|ReferenceError|SyntaxError|failed|crashed/i.test(line)) continue
+    for (const f of REVIEW_FILES) {
+      const basename = path.basename(f, '.ts')
+      if (line.includes(basename) || line.includes(f)) {
+        freq.set(f, (freq.get(f) ?? 0) + 1)
+      }
+    }
+  }
+
+  if (freq.size === 0) {
+    // No signal — fall back to round-robin from baseIndex
+    return [...REVIEW_FILES.slice(baseIndex), ...REVIEW_FILES.slice(0, baseIndex)]
+  }
+
+  // Sort by error count desc, files not seen go to end
+  return [...REVIEW_FILES].sort((a, b) => (freq.get(b) ?? 0) - (freq.get(a) ?? 0))
+}
+
+/** Get recent error log lines that mention a specific file */
+function getRecentErrors(targetFile: string, n = 15): string {
+  const basename = path.basename(targetFile, '.ts')
+  const lines = [
+    ...readLastLines(LOG_FILE, 500),
+    ...readLastLines(LOG_ERR_FILE, 300),
+  ]
+  const relevant = lines.filter(l =>
+    (l.includes(basename) || l.includes(targetFile)) &&
+    /ERROR|WARN|TypeError|ReferenceError|failed|crashed/i.test(l)
+  )
+  if (relevant.length === 0) return '(no recent errors for this file)'
+  return relevant.slice(-n).join('\n')
+}
+
+/** Count total error lines in the last hour across all logs */
+function getErrorCountLastHour(): number {
+  const cutoff = Date.now() - 60 * 60 * 1000
+  const lines = readLastLines(LOG_FILE, 2000)
+  let count = 0
+  for (const line of lines) {
+    const tsMatch = line.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/)
+    if (tsMatch) {
+      try {
+        if (new Date(tsMatch[1]).getTime() < cutoff) continue
+      } catch { /* skip unparseable timestamps */ }
+    }
+    if (/ERROR|TypeError|ReferenceError|failed|crashed/i.test(line)) count++
+  }
+  return count
+}
+
+/** Read LESSONS.md from the workspace */
+function readLessons(): string {
+  const candidates = [
+    path.join(os.homedir(), '.hydra', 'workspace', 'LESSONS.md'),
+    path.join(os.homedir(), '.hydra', 'LESSONS.md'),
+  ]
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8').slice(0, 2000)
+    } catch { /* continue */ }
+  }
+  return ''
+}
+
+/**
+ * Should we trigger a self-review right now (outside the normal schedule)?
+ * Returns a reason string if yes, null if no.
+ */
+export function shouldRunNow(): string | null {
+  const errCount = getErrorCountLastHour()
+  if (errCount >= 10) return `error spike (${errCount} errors in last hour)`
+
+  try {
+    const recent = execSync(
+      'git -C /Users/gszulc/hydra log --oneline --since="1 hour ago"',
+      { encoding: 'utf8', timeout: 5000 }
+    )
+    const lines = recent.trim().split('\n').filter(Boolean)
+    const hasFeatOrFix = lines.some(l => /^[a-f0-9]+ (feat:|fix:)/.test(l))
+    if (hasFeatOrFix) return `recent commits: ${lines.slice(0, 2).join(', ')}`
+  } catch { /* ignore */ }
+
+  return null
+}
+
+// ─── System prompts ──────────────────────────────────────────────────────────
+
+const ANALYZE_SYSTEM = `You are a senior TypeScript code reviewer. Analyze the given source file for bugs, gaps, and improvement opportunities.
+
+Your job is ANALYSIS ONLY — do NOT write code fixes.
+Output a numbered list of specific issues ordered by severity (most critical first).
+Quote the exact function name / line range when identifying each issue.
+Focus on: unhandled promise rejections, missing error boundaries, edge cases, logic bugs, performance issues.
+Limit to the top 3 most impactful issues. Be concise and specific.`
 
 const REVIEW_SYSTEM = `You are agent_smith, reviewing your own source code to find improvements.
 
@@ -92,6 +217,8 @@ RULES:
 - Make at most 2 changes per review
 - Do NOT include REPLACE blocks unless you are certain the FIND text exists verbatim`
 
+// ─── Types ───────────────────────────────────────────────────────────────────
+
 export type ReviewResult = {
   changed: boolean
   summary: string
@@ -99,10 +226,17 @@ export type ReviewResult = {
   willRestart: boolean
 }
 
-export async function runSelfReview(triggerWorkdir?: string): Promise<ReviewResult> {
+// ─── Main review function ─────────────────────────────────────────────────────
+
+export async function runSelfReview(triggerWorkdir?: string, instructions?: string): Promise<ReviewResult> {
   const state = loadState()
-  const fileIndex = state.lastFileIndex % REVIEW_FILES.length
-  const targetFile = REVIEW_FILES[fileIndex]
+
+  // ── 1. Log-driven file selection ──────────────────────────────────────────
+  const rankedFiles = rankFilesByErrors(state.lastFileIndex % REVIEW_FILES.length)
+  const targetFile = rankedFiles[0]
+  const fileIndex = REVIEW_FILES.indexOf(targetFile) >= 0
+    ? REVIEW_FILES.indexOf(targetFile)
+    : state.lastFileIndex % REVIEW_FILES.length
 
   log.info(`[self-review] reviewing ${targetFile} (review #${state.totalReviews + 1})`)
 
@@ -111,51 +245,85 @@ export async function runSelfReview(triggerWorkdir?: string): Promise<ReviewResu
     return { changed: false, summary: `File ${targetFile} not found — skipping.`, filesModified: [], willRestart: false }
   }
 
+  // ── 2. Rich context ────────────────────────────────────────────────────────
   const gitLog = getRecentGitLog()
+  const recentErrors = getRecentErrors(targetFile)
+  const lessons = readLessons()
   const workdir = triggerWorkdir ?? path.join(os.homedir(), '.hydra', 'review-workdir')
   fs.mkdirSync(workdir, { recursive: true })
 
-  const prompt = `Here is my source file \`${targetFile}\` — review it and improve it if you see anything worth fixing.
+  const contextBlock = [
+    lessons ? `## Lessons I've learned (LESSONS.md)\n${lessons}` : '',
+    `## Recent errors related to \`${path.basename(targetFile)}\`\n\`\`\`\n${recentErrors}\n\`\`\``,
+    `## Recent git history\n\`\`\`\n${gitLog}\n\`\`\``,
+  ].filter(Boolean).join('\n\n')
 
-Recent git history (what I've been working on):
-\`\`\`
-${gitLog}
-\`\`\`
+  const basePrompt = `Here is my source file \`${targetFile}\` — review it and improve it if you see anything worth fixing.
 
-File content of \`${targetFile}\`:
+${contextBlock}
+
+## File: \`${targetFile}\`
 \`\`\`typescript
 ${fileContent.slice(0, 12000)}${fileContent.length > 12000 ? '\n... (truncated)' : ''}
 \`\`\`
 
 Look for:
 1. Bugs or edge cases that could cause errors
-2. Missing error handling on network calls
-3. Any obvious feature gaps given what this file does
+2. Missing error handling on network / async calls
+3. Feature gaps given what this file does
 4. Code that could be simpler or cleaner
 
-Make at most 1-2 focused improvements. If the file looks good, say so.`
+Make at most 1-2 focused improvements. If the file looks good, say so.${instructions ? `\n\n**Special focus from owner:** ${instructions}` : ''}`
 
+  // ── 3. Two-stage pipeline ─────────────────────────────────────────────────
   let response = ''
   try {
     const { callClaudeDirect, isClaudeConfigured, callOllama } = await import('./copilot-chat.js')
+
+    // Stage 1: Analysis — identify what needs fixing (no code output)
+    let analysis = ''
+    const analyzePrompt = `${basePrompt}\n\nIdentify the top issues only — do NOT write code fixes yet.`
+
     if (isClaudeConfigured()) {
+      log.info('[self-review] stage 1: analyzing with claude-opus-4-6')
       try {
-        log.info('[self-review] using claude-opus-4-6')
-        response = await callClaudeDirect(prompt, undefined, REVIEW_SYSTEM, 'claude-opus-4-6')
-      } catch (claudeErr) {
-        log.warn(`[self-review] Claude failed (${claudeErr}) — falling back to devstral-2:123b`)
-        response = await callOllama(prompt, REVIEW_SYSTEM, 'devstral-2:123b')
+        analysis = await callClaudeDirect(analyzePrompt, undefined, ANALYZE_SYSTEM, 'claude-opus-4-6')
+        log.info(`[self-review] analysis: ${analysis.slice(0, 120).replace(/\n/g, ' ')}`)
+      } catch (e) {
+        log.warn(`[self-review] opus analysis failed (${e}) — skipping to single-stage`)
       }
     } else {
-      log.info('[self-review] claude not configured — using devstral-2:123b')
-      response = await callOllama(prompt, REVIEW_SYSTEM, 'devstral-2:123b')
+      log.info('[self-review] stage 1: analyzing with nemotron-3-super')
+      try {
+        analysis = await callOllama(analyzePrompt, ANALYZE_SYSTEM, 'nemotron-3-super')
+        log.info(`[self-review] nemotron analysis: ${analysis.slice(0, 120).replace(/\n/g, ' ')}`)
+      } catch (e) {
+        log.warn(`[self-review] nemotron analysis failed (${e}) — skipping`)
+      }
+    }
+
+    // Stage 2: Implementation — devstral writes the fix based on analysis
+    const implementPrompt = analysis
+      ? `${basePrompt}\n\n## Analysis from senior reviewer:\n${analysis}\n\nNow implement fixes for the top issue(s) identified above using REPLACE blocks.`
+      : basePrompt
+
+    log.info('[self-review] stage 2: implementing with devstral-2:123b')
+    try {
+      response = await callOllama(implementPrompt, REVIEW_SYSTEM, 'devstral-2:123b')
+    } catch (devstralErr) {
+      log.warn(`[self-review] devstral failed (${devstralErr}) — falling back`)
+      if (isClaudeConfigured()) {
+        response = await callClaudeDirect(implementPrompt, undefined, REVIEW_SYSTEM, 'claude-sonnet-4-6')
+      } else {
+        throw devstralErr
+      }
     }
   } catch (e) {
     log.error(`[self-review] AI call failed: ${e}`)
     return { changed: false, summary: `Review failed: ${e}`, filesModified: [], willRestart: false }
   }
 
-  // Parse <<<REPLACE: path>>> blocks and <<<RESTART>>> tag
+  // ── Parse REPLACE blocks ──────────────────────────────────────────────────
   const filesModified: string[] = []
   const REPLACE_BLOCK_RE = /<<<REPLACE:\s*([^>]+)>>>\s*\nFIND:\n([\s\S]*?)\nREPLACE_WITH:\n([\s\S]*?)<<<END_REPLACE>>>/g
   const RESTART_RE = /<<<RESTART>>>/i
@@ -183,8 +351,7 @@ Make at most 1-2 focused improvements. If the file looks good, say so.`
         log.warn(`[self-review] FIND text not found in ${filePath} — skipping`)
         continue
       }
-      const updated = original.replace(findText, replaceText)
-      fs.writeFileSync(fullPath, updated)
+      fs.writeFileSync(fullPath, original.replace(findText, replaceText))
       filesModified.push(filePath)
       log.info(`[self-review] patched ${filePath}`)
     } catch (e) {
@@ -199,22 +366,26 @@ Make at most 1-2 focused improvements. If the file looks good, say so.`
 
   // Update state
   state.lastRunAt = new Date().toISOString()
-  state.lastFileIndex = fileIndex + 1
+  state.lastFileIndex = (fileIndex + 1) % REVIEW_FILES.length
   state.totalReviews++
   const shortSummary = clean.slice(0, 200).replace(/\n/g, ' ')
   state.improvements = [shortSummary, ...state.improvements].slice(0, 10)
+  state.lastErrorCount = getErrorCountLastHour()
   saveState(state)
 
   const changed = filesModified.length > 0
 
-  // Typecheck before pushing — revert if broken
+  // ── 4+5. Typecheck + runtime check before pushing ─────────────────────────
   if (changed) {
     log.info(`[self-review] typechecking ${filesModified.length} modified file(s)...`)
     const affectedPackages = new Set<string>()
     for (const f of filesModified) {
       if (f.startsWith('packages/')) affectedPackages.add(f.split('/')[1])
     }
-    let typecheckPassed = true
+
+    let checksPassed = true
+
+    // Typecheck pass
     for (const pkg of affectedPackages) {
       try {
         execSync(
@@ -223,15 +394,33 @@ Make at most 1-2 focused improvements. If the file looks good, say so.`
         )
         log.info(`[self-review] typecheck passed: @hydra/${pkg}`)
       } catch (tcErr) {
-        const errOut = String(tcErr).slice(0, 500)
-        log.warn(`[self-review] typecheck FAILED for @hydra/${pkg}: ${errOut}`)
-        typecheckPassed = false
+        log.warn(`[self-review] typecheck FAILED for @hydra/${pkg}: ${String(tcErr).slice(0, 400)}`)
+        checksPassed = false
       }
     }
 
-    if (!typecheckPassed) {
-      // Revert all patched files
-      log.warn(`[self-review] reverting changes due to typecheck failure`)
+    // ── 5. Runtime check — tsx --check on gateway entry point ────────────────
+    if (checksPassed && affectedPackages.has('gateway')) {
+      try {
+        execSync(
+          `cd ${HYDRA_DIR} && npx tsx --check packages/gateway/src/index.ts`,
+          { encoding: 'utf8', timeout: 30_000 }
+        )
+        log.info('[self-review] tsx runtime check passed')
+      } catch (runtimeErr) {
+        const errOut = String(runtimeErr)
+        // If tsx doesn't support --check, it returns "Unknown flag" — treat as pass
+        if (/[Uu]nknown.*(flag|option|argument)|unrecognized/i.test(errOut)) {
+          log.info('[self-review] tsx --check not supported — skipping runtime check')
+        } else {
+          log.warn(`[self-review] runtime check FAILED: ${errOut.slice(0, 300)}`)
+          checksPassed = false
+        }
+      }
+    }
+
+    if (!checksPassed) {
+      log.warn('[self-review] reverting changes due to check failure')
       for (const f of filesModified) {
         try {
           execSync(`cd ${HYDRA_DIR} && git checkout -- ${f}`, { encoding: 'utf8' })
@@ -240,26 +429,22 @@ Make at most 1-2 focused improvements. If the file looks good, say so.`
           log.warn(`[self-review] could not revert ${f}: ${e}`)
         }
       }
-      state.lastRunAt = new Date().toISOString()
-      state.lastFileIndex = fileIndex + 1
-      state.totalReviews++
-      saveState(state)
       return {
         changed: false,
-        summary: `Reviewed \`${targetFile}\` — patch applied but failed typecheck, reverted.\n${clean.slice(0, 500)}`,
+        summary: `Reviewed \`${targetFile}\` — patch failed checks and was reverted.\n${clean.slice(0, 500)}`,
         filesModified: [],
         willRestart: false,
       }
     }
 
-    // Typecheck passed — push to GitHub
+    // All checks passed — push to GitHub
     try {
       const commitMsg = `self-improve: ${targetFile.split('/').pop()} — ${shortSummary.slice(0, 80)}`
       execSync(
         `cd ${HYDRA_DIR} && git add -A && git commit -m ${JSON.stringify(commitMsg)} && git push`,
         { encoding: 'utf8', timeout: 30_000 }
       )
-      log.info(`[self-review] pushed improvements to GitHub`)
+      log.info('[self-review] pushed improvements to GitHub')
     } catch (e) {
       log.warn(`[self-review] git push failed: ${e}`)
     }
