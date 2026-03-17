@@ -32,6 +32,43 @@ export class TelegramChannel extends BaseChannel {
   private setupHandlers(): void {
     this.bot.use(sequentialize((ctx) => String(ctx.chat?.id ?? ctx.from?.id ?? "unknown")));
 
+    // Handle GPS location shares from Telegram
+    this.bot.on("message:location", async (ctx) => {
+      if (!this.isAllowed(ctx.from?.id, ctx.from?.username)) return;
+      const { latitude: lat, longitude: lon } = ctx.message.location;
+      // Reverse geocode using Nominatim (free, no API key)
+      let city = `${lat.toFixed(3)}, ${lon.toFixed(3)}`;
+      try {
+        const res = await fetch(
+          `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`,
+          { headers: { 'User-Agent': 'Hydra-Bot/1.0' } }
+        );
+        if (res.ok) {
+          const data = await res.json() as any;
+          const addr = data.address ?? {};
+          const parts = [addr.city || addr.town || addr.village || addr.county, addr.state].filter(Boolean);
+          if (parts.length) city = parts.join(', ');
+        }
+      } catch {}
+      const chatId = ctx.chat.id;
+      const msgId = ctx.message.message_id;
+      const inbound: InboundMessage = {
+        id: String(msgId),
+        channelId: this.id,
+        threadId: String(chatId),
+        senderId: String(ctx.from?.id ?? 'unknown'),
+        senderName: ctx.from?.username ?? ctx.from?.first_name,
+        text: `📍 I'm currently in ${city}`,
+        location: { lat, lon, city },
+        timestamp: new Date(ctx.message.date * 1000),
+        raw: ctx.message,
+        setReaction: async (emoji: string) => {
+          try { await (this.bot.api as any).setMessageReaction(chatId, msgId, [{ type: 'emoji', emoji }]); } catch {}
+        },
+      };
+      this.emitEvent({ type: 'message', message: inbound });
+    });
+
     this.bot.on("message", async (ctx) => {
       if (!this.isAllowed(ctx.from?.id, ctx.from?.username)) return;
       const text = ctx.message.text ?? ctx.message.caption ?? "";
@@ -138,6 +175,7 @@ export class TelegramChannel extends BaseChannel {
       { command: "can",             description: "Show what the bot can do right now" },
       { command: "tune",            description: "Show prompt auto-tuning status" },
       { command: "goals",           description: "List active goals" },
+      { command: "browse",          description: "Open URL in browser and read/interact with page" },
     ]).catch(() => {});
 
     if (this.config.webhookUrl) {
@@ -195,6 +233,16 @@ export class TelegramChannel extends BaseChannel {
 
   async sendTyping(threadId: string): Promise<void> {
     await this.bot.api.sendChatAction(Number(threadId), "typing");
+  }
+
+  async sendLocationRequest(threadId: string, prompt: string): Promise<void> {
+    await this.bot.api.sendMessage(Number(threadId), prompt, {
+      reply_markup: {
+        keyboard: [[{ text: "📍 Share my location", request_location: true }]],
+        resize_keyboard: true,
+        one_time_keyboard: true,
+      },
+    });
   }
 
   private isAllowed(userId?: number, username?: string): boolean {

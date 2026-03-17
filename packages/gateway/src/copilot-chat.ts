@@ -329,3 +329,67 @@ function defaultSystemPrompt(): string {
     `Use plain text. No filler phrases.`
   )
 }
+
+// ─── Smart Subagent Dispatcher ────────────────────────────────────────────────
+// The agent decides how to decompose problems and which models to use.
+// It can route by model name directly: "devstral-2:123b: write the code"
+// Or write plain tasks and let intent classification pick the model.
+// All tasks run in parallel.
+
+import { classifyIntent, getOllamaModelForIntent } from './router.js'
+
+// Known available models the agent can route to by name
+const MODEL_ALIASES: Record<string, string> = {
+  'devstral': 'devstral-2:123b',
+  'nemotron': 'nemotron-3-super',
+  'deepseek': 'deepseek-v3.2',
+  'llava': 'llava-v1.6',
+}
+
+export type SubagentResult = {
+  task: string
+  model: string
+  result: string
+  error?: string
+}
+
+export async function callSmartSubagent(rawTask: string): Promise<SubagentResult> {
+  const trimmed = rawTask.trim()
+
+  // Agent can route by model name: "devstral-2:123b: task" or "devstral: task"
+  const modelRouteMatch = trimmed.match(/^([\w.:-]+):\s*(.+)/is)
+  let task = trimmed
+  let ollamaModel: string | undefined
+
+  if (modelRouteMatch) {
+    const candidate = modelRouteMatch[1].toLowerCase()
+    const fullName = MODEL_ALIASES[candidate] ?? (
+      // Accept full model names like "devstral-2:123b"
+      Object.values(MODEL_ALIASES).includes(modelRouteMatch[1]) ? modelRouteMatch[1] : null
+    )
+    if (fullName) {
+      // Agent explicitly chose a model — honor it
+      task = modelRouteMatch[2].trim()
+      ollamaModel = fullName
+    }
+  }
+
+  // If no explicit model, let intent classification pick
+  if (!ollamaModel) {
+    const intent = classifyIntent(task, false)
+    ollamaModel = getOllamaModelForIntent(intent as any)
+  }
+
+  const modelLabel = ollamaModel ?? 'auto'
+
+  try {
+    const result = await callDirect(task, undefined, undefined, ollamaModel)
+    return { task, model: modelLabel, result }
+  } catch (e) {
+    return { task, model: modelLabel, result: '', error: String(e) }
+  }
+}
+
+export async function callSmartSubagentsParallel(tasks: string[]): Promise<SubagentResult[]> {
+  return Promise.all(tasks.map(t => callSmartSubagent(t)))
+}

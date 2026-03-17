@@ -197,6 +197,7 @@ export function ensureWorkspaceFiles(workdir: string, ctx: WorkspaceContext): vo
       'USER.md': buildUserFile(ctx),
       'MEMORY.md': '# Memory\n\n(No notes yet.)\n',
       'HEARTBEAT.md': '# Heartbeat Log\n\n(No check-ins yet.)\n',
+      'SELF.md': writeSelfAwareness(), // Add missing SELF.md generation
     }
 
     for (const [filename, content] of Object.entries(defaults)) {
@@ -218,7 +219,7 @@ export function ensureWorkspaceFiles(workdir: string, ctx: WorkspaceContext): vo
 
 /** Read all bootstrap files from workdir, return as filename -> content map */
 export function readWorkspaceFiles(workdir: string): Record<string, string> {
-  const filenames = ['SOUL.md', 'AGENTS.md', 'SELF.md', 'LESSONS.md', 'GOALS.md', 'IDENTITY.md', 'USER.md', 'MEMORY.md', 'HEARTBEAT.md']
+  const filenames = ['SOUL.md', 'AGENTS.md', 'SELF.md', 'LESSONS.md', 'GOALS.md', 'IDENTITY.md', 'USER.md', 'MEMORY.md', 'HEARTBEAT.md', 'CAPABILITIES.md', 'FACTS.md']
   const result: Record<string, string> = {}
   for (const filename of filenames) {
     const filePath = path.join(workdir, filename)
@@ -226,7 +227,9 @@ export function readWorkspaceFiles(workdir: string): Record<string, string> {
       if (fs.existsSync(filePath)) {
         result[filename] = fs.readFileSync(filePath, 'utf8').trim()
       }
-    } catch {}
+    } catch (e) {
+      log.warn(`Failed to read ${filename}: ${e}`)
+    }
   }
   return result
 }

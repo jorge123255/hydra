@@ -18,6 +18,8 @@ export type InboundMessage = {
   voiceMimeType?: string;
   replyToId?: string;
   timestamp: Date;
+  // GPS location from Telegram location share
+  location?: { lat: number; lon: number; city?: string };
   raw?: unknown;
   // Set a reaction emoji on the original message (feature 5)
   setReaction?: (emoji: string) => Promise<void>;

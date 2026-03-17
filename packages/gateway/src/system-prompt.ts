@@ -148,7 +148,7 @@ export function buildSystemPrompt(ctx: PromptContext): string {
   }
 
   // ── Workspace bootstrap files ──────────────────────────────────────────────
-  const fileOrder = ['AGENTS.md', 'USER.md', 'MEMORY.md', 'HEARTBEAT.md']
+  const fileOrder = ['AGENTS.md', 'LESSONS.md', 'GOALS.md', 'CAPABILITIES.md', 'FACTS.md', 'USER.md', 'MEMORY.md', 'HEARTBEAT.md']
   const fileBlocks = fileOrder
     .filter((f) => ctx.bootstrapFiles?.[f]?.trim())
     .map((f) => `### ${f}\n${ctx.bootstrapFiles![f].trim()}`)
@@ -158,6 +158,69 @@ export function buildSystemPrompt(ctx: PromptContext): string {
   if (ctx.memory?.trim()) {
     sections.push(`## Memory\n${ctx.memory.trim()}`)
   }
+
+  // ── Autonomous tools ──────────────────────────────────────────────────────
+  sections.push(
+    `## Autonomous Tools (use these yourself, no user input needed)\n` +
+    `You can invoke tools directly by including these tags in your response.\n` +
+    `The gateway strips the tag, runs the tool, and injects the result inline.\n\n` +
+    `**Browse the web:**\n` +
+    `[BROWSE: https://example.com what is the main headline]\n` +
+    `[BROWSE: https://news.ycombinator.com]\n\n` +
+    `**Control the Mac desktop:**\n` +
+    `[COMPUTER: what apps are currently open]\n` +
+    `[COMPUTER: take a screenshot and describe what you see]\n\n` +
+    `**Delegate parallel tasks to specialist AI workers:**\n` +
+    `[SUBAGENT: task one | task two | task three]\n` +
+    `You have access to powerful specialist models. You decide which to use based on what you know about them:\n` +
+    `  devstral-2:123b — a 123B model built specifically for code. Use it when you need real implementation work done.\n` +
+    `  nemotron-3-super — a 120B model with 256K context, exceptional for research and knowledge synthesis.\n` +
+    `  deepseek-v3.2 — a reasoning specialist. Use it when a problem needs careful logic, not just pattern matching.\n` +
+    `Route to a specific model by prefixing the task: "devstral-2:123b: implement the auth middleware"\n` +
+    `Or write plain tasks and the system picks based on content.\n` +
+    `All tasks run in parallel. Use subagents whenever a problem has multiple independent parts.\n\n` +
+    `**Save to memory:**\n` +
+    `[SAVE: key=value]\n\n` +
+    `Use these proactively. If someone asks about weather, use [BROWSE: https://wttr.in/${encodeURIComponent(ctx.location?.split(",")[0]?.trim() ?? "auto")}?format=3] — wttr.in/?format=3 returns one clean line with current weather. Use the location from your Context section.\n` +
+    `If someone asks "what do I have open?", use [COMPUTER: list visible apps].\n` +
+    `Don't ask permission — just use the tool and show the result.\n\n` +
+    `**Request user's GPS location (Telegram only):**\n` +
+    `[REQUEST_LOCATION]\n` +
+    `Use this when you need the user's location and don't have it. They get a one-tap button to share GPS.\n` +
+    `Example: if someone asks for weather and no location is in Context, reply with:\n` +
+    `"[REQUEST_LOCATION] Tap below to share your location and I'll get the weather for you."\n` +
+    `Once they share, their location is saved and you can use it for weather, local info, etc.`
+  )
+
+  // ── Available commands ─────────────────────────────────────────────────────
+  sections.push(
+    `## User Commands (slash commands the user can type)\n` +
+    `These slash commands are available (you can suggest them when relevant):\n` +
+    `- /help — list all commands\n` +
+    `- /status — provider, model, memory stats\n` +
+    `- /remember <text> — save a note\n` +
+    `- /forget — clear thread memory\n` +
+    `- /search <query> — search memory\n` +
+    `- /computer <task> — control the Mac desktop (osascript, cliclick)\n` +
+    `- /browse <url> [instruction] — open URL in browser, read or interact with page\n` +
+    `- /code <prompt> — force code route to OpenCode\n` +
+    `- /fast <prompt> — quick chat, skip OpenCode\n` +
+    `- /goals — list active goals\n` +
+    `- /goal <text> — add a goal\n` +
+    `- /facts — list time-limited facts\n` +
+    `- /health — check all provider health\n` +
+    `- /stats — call metrics and latency\n` +
+    `- /audit — decision audit trail\n` +
+    `- /can — live capability inventory\n` +
+    `- /tune — prompt auto-tune status\n` +
+    `- /model [name] — show or switch model\n` +
+    `- /schedule <expr> <task> — schedule recurring task\n` +
+    `- /tasks — list scheduled tasks\n` +
+    `- /providers — all AI providers and routing\n` +
+    `- /vision_usage — vision budget\n` +
+    `- /chatgpt_sync — sync ChatGPT token from codex CLI\n` +
+    `- /restart — restart the daemon`
+  )
 
   return sections.join('\n\n')
 }

@@ -103,6 +103,21 @@ export function buildCapabilities(): Capability[] {
       lastVerified: now,
     },
     {
+      id: 'subagents',
+      name: 'Parallel AI Subagents',
+      description: [
+        'Spawn parallel AI workers via [SUBAGENT: task1 | task2 | task3].',
+        'Available models (route by name or let the system classify):',
+        '  devstral-2:123b — 123B coding specialist. Best for: write/fix/refactor code, generate tests, explain algorithms.',
+        '  nemotron-3-super — 120B research model, 256K context. Best for: deep knowledge, long documents, summarization, facts.',
+        '  deepseek-v3.2 — reasoning specialist. Best for: logic puzzles, step-by-step analysis, comparing trade-offs, hard decisions.',
+        '  llava-v1.6 — vision model. Best for: describing images, reading charts.',
+        'Route by name: "devstral-2:123b: write the implementation" or just write the task and let the system pick.',
+      ].join(' '),
+      available: true,
+      lastVerified: now,
+    },
+    {
       id: 'self_improve',
       name: 'Self-Improvement',
       description: 'Review and patch own source code every 6h',

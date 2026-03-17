@@ -39,6 +39,7 @@ import {
   getVisionUsageStatus,
   isCodexConfigured,
   isOllamaCloud,
+  callSmartSubagentsParallel,
 } from "./copilot-chat.js";
 import {
   buildAuthUrl,
@@ -168,6 +169,7 @@ const CMD_TUNE = /^\/tune$/i;
 const CMD_AUDIT = /^\/audit$/i;
 const CMD_FACTS = /^\/facts$/i;
 const CMD_CAN = /^\/can$/i;
+const CMD_BROWSE = /^\/browse(?:\s+(\S+))?(?:\s+(.+))?$/i;
 
 const NO_CREDS_MSG = [
   "No AI credentials configured.",
@@ -339,23 +341,108 @@ ${report}` }).catch(() => {});
     // Extract [FACT:] tags
     const { clean: afterFacts } = extractFactTags(afterDecisions, channelId, threadId);
 
-    // Run [SUBAGENT: task1 | task2 | task3] fan-outs
-    const subagentPattern = /\[SUBAGENT:\s*([^\]]+)\]/gi;
+    // Run [BROWSE: url instruction] — agent-initiated browser automation
+    const browseTagPattern = /\[BROWSE:\s*(https?:\/\/\S+)(?:\s+([^\]]+))?\]/gi;
     let result = afterFacts;
-    const subagentMatches = [...afterFacts.matchAll(subagentPattern)];
+    const browseMatches = [...afterFacts.matchAll(browseTagPattern)];
+    for (const match of browseMatches) {
+      const url = match[1].trim();
+      const instruction = (match[2] ?? '').trim();
+      try {
+        log.info(`[tool:browse] navigating to ${url} — "${instruction}"`);
+        const { navigate, ariaSnapshot, currentUrl: getUrl, evaluate: pageEval } = await import('@hydra/computer-use');
+        const { callDirect } = await import('./copilot-chat.js');
+        await navigate(url);
+
+        // Get page content — try body text first (works for plain text/data pages),
+        // fall back to ARIA snapshot (works for rich HTML)
+        let pageText = '';
+        try {
+          const bodyText = await pageEval<string>(`document.body.innerText`);
+          if (bodyText && bodyText.trim().length > 10) pageText = bodyText.trim();
+        } catch {}
+        if (!pageText) {
+          pageText = await ariaSnapshot();
+        }
+
+        let toolResult: string;
+        if (instruction) {
+          const prompt = [
+            `URL: ${await getUrl()}`,
+            `Task: ${instruction}`,
+            `Page content:\n${pageText.slice(0, 3000)}`,
+            `Answer the task directly based on the page content. Be concise.`,
+          ].join('\n');
+          toolResult = await callDirect(prompt, undefined, 'You are reading a web page. Answer based only on the page content. Be concise and direct.');
+        } else {
+          // No instruction — return the raw page text directly (great for wttr.in, APIs, etc.)
+          toolResult = pageText.slice(0, 800);
+        }
+        result = result.replace(match[0], `\n\n🌐 ${toolResult.trim()}`);
+      } catch (e) {
+        result = result.replace(match[0], `[browse error: ${e}]`);
+      }
+    }
+
+    // Run [COMPUTER: task] — agent-initiated desktop automation
+    const computerTagPattern = /\[COMPUTER:\s*([^\]]+)\]/gi;
+    const computerMatches = [...result.matchAll(computerTagPattern)];
+    for (const match of computerMatches) {
+      const task = match[1].trim();
+      try {
+        log.info(`[tool:computer] running task: "${task}"`);
+        const { runComputerTask } = await import('@hydra/computer-use');
+        const taskResult = await runComputerTask({ instruction: task, maxIterations: 6 });
+        const toolResult = taskResult.success ? taskResult.output : `Failed: ${taskResult.output}`;
+        result = result.replace(match[0], `\n\n🖥️ ${toolResult.trim()}`);
+      } catch (e) {
+        result = result.replace(match[0], `[computer error: ${e}]`);
+      }
+    }
+
+    // Run [SUBAGENT: task1 | task2 | task3] fan-outs
+    // Each task is classified and routed to the best model automatically.
+    // Optional hints: "code: task", "research: task", "reason: task"
+    const subagentPattern = /\[SUBAGENT:\s*([^\]]+)\]/gi;
+    const subagentMatches = [...result.matchAll(subagentPattern)];
     for (const match of subagentMatches) {
       const tasks = match[1].split('|').map(t => t.trim()).filter(Boolean);
-      if (tasks.length === 0 || !isCodexPoolConfigured()) continue;
+      if (tasks.length === 0) continue;
       try {
-        log.info(`[subagent] fanning out ${tasks.length} task(s) to ChatGPT pool`);
-        const results = await callSubagentsParallel(tasks);
-        const formatted = results.map((r, i) => `**Subagent ${i+1}:** ${r}`).join('\n\n');
+        log.info(`[subagent] smart fan-out: ${tasks.length} task(s)`);
+        const results = await callSmartSubagentsParallel(tasks);
+        const formatted = results.map((r, i) => {
+          const header = `**[${r.model}] Task ${i+1}:**`;
+          return r.error ? `${header} Error — ${r.error}` : `${header}\n${r.result}`;
+        }).join('\n\n');
         result = result.replace(match[0], `\n\n---\n${formatted}\n---`);
       } catch (e) {
         result = result.replace(match[0], `[subagent error: ${e}]`);
       }
     }
+    // Handle [REQUEST_LOCATION] — bot asks user to share GPS via Telegram button
+    if (result.includes('[REQUEST_LOCATION]')) {
+      result = result.replace(/\[REQUEST_LOCATION\]/gi, '').trim();
+      // Signal to caller that we need to send a location request button
+      // We store it as a special marker the channel methods will pick up
+      result = result + '\n[__REQUEST_LOCATION__]';
+    }
+
     return result;
+  }
+
+  /** After processAiResponse, check for location request signal and send button */
+  private async maybeRequestLocation(text: string, message: InboundMessage, channel: any): Promise<string> {
+    if (!text.includes('[__REQUEST_LOCATION__]')) return text;
+    const clean = text.replace('[__REQUEST_LOCATION__]', '').trim();
+    if (typeof channel.sendLocationRequest === 'function') {
+      await channel.sendLocationRequest(
+        message.threadId,
+        clean || "I need your location to help with that. Tap below to share:"
+      ).catch(() => {});
+      return ''; // message already sent via button
+    }
+    return clean;
   }
 
   // ── Inbound debounce ─────────────────────────────────────────────────────────
@@ -1225,6 +1312,18 @@ ${conf}` : getStatsSummary() });
       return;
     }
 
+    const browseMatch = text.match(CMD_BROWSE);
+    if (browseMatch) {
+      const url = browseMatch[1] || '';
+      const instruction = browseMatch[2] || '';
+      if (!url || !url.startsWith('http')) {
+        await channel.send({ threadId: message.threadId, text: 'Usage: /browse <url> [instruction]\nExample: /browse https://news.ycombinator.com summarize top stories' });
+        return;
+      }
+      await this.runBrowseTask(message, url, instruction, channel);
+      return;
+    }
+
     await this.runAgentMessage(message);
   }
 
@@ -1337,6 +1436,16 @@ ${conf}` : getStatsSummary() });
     );
     const memory = readMemory(message.channelId, message.threadId);
 
+    // Dynamic location — use GPS share or fall back to env var
+    const dynamicLocation = (message as any).location?.city
+      ?? process.env.HYDRA_USER_LOCATION;
+
+    // If user shared a new location, save it to env for this process
+    if ((message as any).location?.city) {
+      process.env.HYDRA_USER_LOCATION = (message as any).location.city;
+      log.info(`[location] updated to ${(message as any).location.city}`);
+    }
+
     const promptMode =
       intent === "computer" ? "computer" : goesToOpenCode ? "code" : "chat";
     const systemPrompt = (autoTunePrefix ? autoTunePrefix : '') + buildSystemPrompt({
@@ -1347,7 +1456,7 @@ ${conf}` : getStatsSummary() });
       ownerIds: this.getOwnerIds(),
       bootstrapFiles: readWorkspaceFiles(session.workdir),
       memory,
-      location: process.env.HYDRA_USER_LOCATION,
+      location: dynamicLocation,
       timezone: process.env.HYDRA_USER_TIMEZONE,
       currentTime: getCurrentTime(process.env.HYDRA_USER_TIMEZONE),
       includeToolHint: goesToOpenCode,
@@ -1468,6 +1577,8 @@ ${conf}` : getStatsSummary() });
         message.channelId,
         message.threadId,
       );
+      finalText = await this.maybeRequestLocation(finalText, message, channel);
+      if (!finalText) return;
 
       // Record AI response in conversation history
       appendHistory(
@@ -1559,6 +1670,8 @@ ${conf}` : getStatsSummary() });
         message.channelId,
         message.threadId,
       );
+      text = await this.maybeRequestLocation(text, message, channel);
+      if (!text) return;
 
       // Record AI response in conversation history
       appendHistory(
@@ -1623,6 +1736,90 @@ ${conf}` : getStatsSummary() });
           `Computer task error: ${e}`,
         )
         .catch(() => {});
+    }
+  }
+
+  private async runBrowseTask(
+    message: InboundMessage,
+    url: string,
+    instruction: string,
+    channel: any,
+  ): Promise<void> {
+    const placeholderId = await channel.sendAndGetId({
+      threadId: message.threadId,
+      text: `🌐 opening ${url}...`,
+    });
+    try {
+      const { navigate, ariaSnapshot, browserScreenshot, parseBrowseAction, executeBrowseAction, currentUrl } = await import('@hydra/computer-use');
+
+      // Step 1: navigate
+      await channel.editMessage(message.threadId, placeholderId, `🌐 navigating to ${url}...`).catch(() => {});
+      const title = await navigate(url);
+      await channel.editMessage(message.threadId, placeholderId, `🌐 loaded: ${title}\nReading page...`).catch(() => {});
+
+      // Step 2: ARIA snapshot (0 tokens)
+      const aria = await ariaSnapshot();
+
+      // If no instruction, just return the page summary
+      if (!instruction) {
+        const summary = `📄 *${title}*\n\`${await currentUrl()}\`\n\n${aria.slice(0, 2000)}${aria.length > 2000 ? '\n...(truncated)' : ''}`;
+        await channel.editMessage(message.threadId, placeholderId, summary).catch(() => {
+          channel.send({ threadId: message.threadId, text: summary });
+        });
+        return;
+      }
+
+      // Step 3: AI-guided interaction loop (up to 6 iterations)
+      const { callDirect } = await import('./copilot-chat.js');
+      let loopAria = aria;
+      let result = '';
+
+      for (let i = 0; i < 6; i++) {
+        await channel.editMessage(message.threadId, placeholderId, `🌐 step ${i + 1}: analyzing page...`).catch(() => {});
+
+        const browsePrompt = [
+          `You are controlling a browser. Current URL: ${await currentUrl()}`,
+          `Task: ${instruction}`,
+          `\nPage ARIA tree:\n${loopAria.slice(0, 3000)}`,
+          `\nRespond with ONE action:`,
+          `NAVIGATE <url>`,
+          `CLICK_TEXT "text on page"`,
+          `CLICK x,y`,
+          `TYPE "text" INTO selector`,
+          `KEY keyname`,
+          `SCROLL up|down`,
+          `JS javascript_expression`,
+          `DONE result_summary`,
+          `FAIL reason`,
+        ].join('\n');
+
+        const aiReply = await callDirect(browsePrompt, undefined, 'You are a browser automation agent. Reply with exactly one action.');
+        const action = parseBrowseAction(aiReply);
+
+        if (!action || action.type === 'done') {
+          result = action?.value || aiReply;
+          break;
+        }
+        if (action.type === 'fail') {
+          result = `❌ ${action.value}`;
+          break;
+        }
+
+        await executeBrowseAction(action);
+        await new Promise(r => setTimeout(r, 1000));
+        try { const { evaluate: _pe } = await import("@hydra/computer-use"); const bt = await _pe<string>(`document.body.innerText`); loopAria = bt?.trim() || await ariaSnapshot(); } catch { loopAria = await ariaSnapshot(); }
+      }
+
+      const finalTitle = title;
+      const reply = result
+        ? `✅ *${finalTitle}*\n\n${result}`
+        : `📄 *${finalTitle}*\n\n${loopAria.slice(0, 2000)}`;
+
+      await channel.editMessage(message.threadId, placeholderId, reply).catch(() => {
+        channel.send({ threadId: message.threadId, text: reply });
+      });
+    } catch (e) {
+      await channel.editMessage(message.threadId, placeholderId, `Browser error: ${e}`).catch(() => {});
     }
   }
 
