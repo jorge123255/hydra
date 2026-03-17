@@ -88,6 +88,9 @@ import { startHealthCheckLoop, runHealthChecks, formatHealthReport, getLastHealt
 import { extractConfidence, logConfidence, getConfidenceSummary, CONFIDENCE_INSTRUCTION } from "./confidence.js";
 import { extractGoalTags, writeGoalsFile, formatGoalsList, listGoals, addGoal, completeGoal, GOALS_INSTRUCTION } from "./goals.js";
 import { getAutoTunePrefix, getTuningStatus } from "./prompt-tuner.js";
+import { logAudit, extractDecisionTags, getRecentAudit, formatAuditLog, DECISION_INSTRUCTION } from "./audit.js";
+import { extractFactTags, writeFactsFile, listActiveFacts, formatFactsList, startFactSweepLoop, FACTS_INSTRUCTION } from "./knowledge.js";
+import { buildCapabilities, formatCapabilities, writeCapabilitiesFile } from "./capabilities.js";
 
 const log = createLogger("gateway");
 
@@ -162,6 +165,9 @@ const CMD_GOALS = /^\/goals$/i;
 const CMD_GOAL_ADD = /^\/goal\s+(?!done\b)(.+)/i;
 const CMD_GOAL_DONE = /^\/goal[-_\s]done\s+(\d+)/i;
 const CMD_TUNE = /^\/tune$/i;
+const CMD_AUDIT = /^\/audit$/i;
+const CMD_FACTS = /^\/facts$/i;
+const CMD_CAN = /^\/can$/i;
 
 const NO_CREDS_MSG = [
   "No AI credentials configured.",
@@ -208,6 +214,7 @@ export class Gateway {
     this.startSelfReviewLoop();
     this.startSelfAwarenessRefresh();
     this.startHealthCheckLoop();
+    startFactSweepLoop();
     // Auto-load tokens from codex CLI if available
     const synced = syncFromCodexCli();
     if (synced) log.info(`[chatgpt] Auto-synced account "${synced.label}" from ~/.codex/auth.json`);
@@ -326,10 +333,16 @@ ${report}` }).catch(() => {});
     // Extract [GOAL:] / [GOAL_DONE:] tags
     const { clean: afterGoals } = extractGoalTags(afterConf, channelId, threadId);
 
+    // Extract [DECISION:] tags
+    const { clean: afterDecisions } = extractDecisionTags(afterGoals, channelId);
+
+    // Extract [FACT:] tags
+    const { clean: afterFacts } = extractFactTags(afterDecisions, channelId, threadId);
+
     // Run [SUBAGENT: task1 | task2 | task3] fan-outs
     const subagentPattern = /\[SUBAGENT:\s*([^\]]+)\]/gi;
-    let result = afterGoals;
-    const subagentMatches = [...afterGoals.matchAll(subagentPattern)];
+    let result = afterFacts;
+    const subagentMatches = [...afterFacts.matchAll(subagentPattern)];
     for (const match of subagentMatches) {
       const tasks = match[1].split('|').map(t => t.trim()).filter(Boolean);
       if (tasks.length === 0 || !isCodexPoolConfigured()) continue;
@@ -1194,6 +1207,24 @@ ${conf}` : getStatsSummary() });
       return;
     }
 
+    if (CMD_AUDIT.test(text)) {
+      const entries = getRecentAudit(15);
+      await channel.send({ threadId: message.threadId, text: formatAuditLog(entries) });
+      return;
+    }
+
+    if (CMD_FACTS.test(text)) {
+      const facts = listActiveFacts(message.channelId, message.threadId);
+      await channel.send({ threadId: message.threadId, text: formatFactsList(facts) });
+      return;
+    }
+
+    if (CMD_CAN.test(text)) {
+      const caps = buildCapabilities();
+      await channel.send({ threadId: message.threadId, text: formatCapabilities(caps) });
+      return;
+    }
+
     await this.runAgentMessage(message);
   }
 
@@ -1220,9 +1251,9 @@ ${conf}` : getStatsSummary() });
       const lessonsContent = getLessonsContent();
       fs.writeFileSync(path.join(session.workdir, "LESSONS.md"), lessonsContent);
     } catch {}
-    try {
-      writeGoalsFile(session.workdir, message.channelId, message.threadId);
-    } catch {}
+    try { writeGoalsFile(session.workdir, message.channelId, message.threadId); } catch {}
+    try { writeFactsFile(session.workdir, message.channelId, message.threadId); } catch {}
+    try { writeCapabilitiesFile(session.workdir); } catch {}
     ensureWorkspaceFiles(session.workdir, {
       channelId: message.channelId,
       senderId: message.senderId,
@@ -1320,7 +1351,7 @@ ${conf}` : getStatsSummary() });
       timezone: process.env.HYDRA_USER_TIMEZONE,
       currentTime: getCurrentTime(process.env.HYDRA_USER_TIMEZONE),
       includeToolHint: goesToOpenCode,
-    }) + CONFIDENCE_INSTRUCTION + GOALS_INSTRUCTION;
+    }) + CONFIDENCE_INSTRUCTION + GOALS_INSTRUCTION + DECISION_INSTRUCTION + FACTS_INSTRUCTION;
 
     const contextPrefix = goesToOpenCode
       ? buildMemoryPrompt(message.channelId, message.threadId, true)
@@ -1353,6 +1384,7 @@ ${conf}` : getStatsSummary() });
     log.info(
       `[${key}] intent=${intent} route=${goesToOpenCode ? "opencode" : ollamaModel ? `ollama:${ollamaModel}` : "direct"} "${prompt.slice(0, 100)}"`,
     );
+    logAudit({ type: 'route', action: `${intent} → ${goesToOpenCode ? 'opencode' : ollamaModel ?? 'claude'}`, reason: `provider selected for intent`, channel: message.channelId });
     await message.setReaction?.("🤔").catch(() => {});
 
     try {

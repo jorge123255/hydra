@@ -133,6 +133,11 @@ export class TelegramChannel extends BaseChannel {
       { command: "health",         description: "Check health of all AI providers" },
       { command: "review",         description: "Trigger self-code-review and improvement" },
       { command: "review_stats",   description: "Show self-review history" },
+      { command: "audit",           description: "Show recent AI decision audit trail" },
+      { command: "facts",           description: "List time-limited facts in memory" },
+      { command: "can",             description: "Show what the bot can do right now" },
+      { command: "tune",            description: "Show prompt auto-tuning status" },
+      { command: "goals",           description: "List active goals" },
     ]).catch(() => {});
 
     if (this.config.webhookUrl) {
