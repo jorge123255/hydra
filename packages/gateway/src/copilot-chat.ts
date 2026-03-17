@@ -47,7 +47,7 @@ import { isCodexPoolConfigured, callSubagent } from './auth/codex-pool.js'
 import { getVisionUsage } from '@hydra/computer-use'
 import { createLogger } from './logger.js'
 
-const log = createLogger('claude-auth')
+const log = createLogger('copilot-chat')
 
 const OPENCODE_AUTH_FILE = path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json')
 const ANTHROPIC_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token'
@@ -243,23 +243,32 @@ export async function callCopilotDirect(
   }
   content.push({ type: 'text', text: prompt })
 
-  const res = await fetch(`${creds.baseUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${creds.token}`,
-      'Copilot-Integration-Id': 'hydra-gateway',
-      'Editor-Version': 'hydra/1.0',
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 4096,
-      messages: [
-        { role: 'system', content: systemPrompt ?? defaultSystemPrompt() },
-        { role: 'user', content },
-      ],
-    }),
-  })
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 180_000)
+
+  let res: Response
+  try {
+    res = await fetch(`${creds.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${creds.token}`,
+        'Copilot-Integration-Id': 'hydra-gateway',
+        'Editor-Version': 'hydra/1.0',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 4096,
+        messages: [
+          { role: 'system', content: systemPrompt ?? defaultSystemPrompt() },
+          { role: 'user', content },
+        ],
+      }),
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
 
   if (!res.ok) {
     const body = await res.text().catch(() => '')
@@ -293,39 +302,4 @@ export async function callDirect(
     throw new Error('Vision requires Claude or Copilot — no vision-capable provider configured')
   }
 
-  // If a specific Ollama model is requested for this intent, use it directly
-  if (ollamaModelOverride && process.env.OLLAMA_DISABLED !== 'true') {
-    const ollamaReady = await isOllamaAvailable()
-    if (ollamaReady) {
-      log.debug(`Routing to Ollama model: ${ollamaModelOverride}`)
-      return callOllama(prompt, systemPrompt, ollamaModelOverride)
-    }
-  }
-
-  // Text chat: try Ollama with default model
-  if (process.env.OLLAMA_DISABLED !== 'true') {
-    const ollamaReady = await isOllamaAvailable()
-    if (ollamaReady) {
-      log.debug('Routing to Ollama (default model)')
-      return callOllama(prompt, systemPrompt)
-    }
-  }
-
-  // Fallback chain: subagent pool → Claude OAuth → Codex → Copilot
-  if (isCodexPoolConfigured()) {
-    log.debug('Routing to ChatGPT subagent pool')
-    return callSubagent(prompt, systemPrompt)
-  }
-  if (isClaudeConfigured()) return callClaudeDirect(prompt, images, systemPrompt)
-  const { isCodexConfigured, callCodexDirect } = await import('./auth/chatgpt-codex.js')
-  if (isCodexConfigured()) return callCodexDirect(prompt, images, systemPrompt)
-  return callCopilotDirect(prompt, images, systemPrompt)
-}
-
-function defaultSystemPrompt(): string {
-  return (
-    `You are Hydra, a personal AI assistant. ` +
-    `Be direct and concise. Lead with the answer. ` +
-    `Use plain text. No filler phrases.`
-  )
-}
+  // If a specific Ollam
