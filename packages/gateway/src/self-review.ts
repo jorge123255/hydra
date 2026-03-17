@@ -138,12 +138,15 @@ Make at most 1-2 focused improvements. If the file looks good, say so.`
   try {
     const { callClaudeDirect, isClaudeConfigured, callOllama } = await import('./copilot-chat.js')
     if (isClaudeConfigured()) {
-      // Claude Opus — best model for understanding and improving code
-      log.info('[self-review] using claude-opus-4-6 for review')
-      response = await callClaudeDirect(prompt, undefined, REVIEW_SYSTEM, 'claude-opus-4-6')
+      try {
+        log.info('[self-review] using claude-opus-4-6')
+        response = await callClaudeDirect(prompt, undefined, REVIEW_SYSTEM, 'claude-opus-4-6')
+      } catch (claudeErr) {
+        log.warn(`[self-review] Claude failed (${claudeErr}) — falling back to deepseek-v3.2`)
+        response = await callOllama(prompt, REVIEW_SYSTEM, 'deepseek-v3.2')
+      }
     } else {
-      // Fall back to deepseek-v3.2 via Ollama Cloud (strong reasoning model)
-      log.info('[self-review] claude not configured — falling back to deepseek-v3.2')
+      log.info('[self-review] claude not configured — using deepseek-v3.2')
       response = await callOllama(prompt, REVIEW_SYSTEM, 'deepseek-v3.2')
     }
   } catch (e) {

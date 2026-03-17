@@ -148,7 +148,11 @@ export function isClaudeConfigured(): boolean {
     const data = JSON.parse(fs.readFileSync(OPENCODE_AUTH_FILE, 'utf8'))
     const ant = data?.anthropic
     if (!ant || ant.type !== 'oauth') return false
-    return typeof ant.access === 'string' && ant.access.length > 0
+    if (typeof ant.access !== 'string' || !ant.access.length) return false
+    // Only report configured if token is valid OR refreshable (has refresh token)
+    const expired = typeof ant.expires === 'number' && (ant.expires - Date.now() < 60_000)
+    if (expired && !ant.refresh) return false
+    return true
   } catch {
     return false
   }
