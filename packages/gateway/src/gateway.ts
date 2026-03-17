@@ -85,6 +85,9 @@ import {
 import { logCall } from "./metrics.js";
 import { extractFeedback, getLessonsContent } from "./lessons.js";
 import { startHealthCheckLoop, runHealthChecks, formatHealthReport, getLastHealthState } from "./health-checker.js";
+import { extractConfidence, logConfidence, getConfidenceSummary, CONFIDENCE_INSTRUCTION } from "./confidence.js";
+import { extractGoalTags, writeGoalsFile, formatGoalsList, listGoals, addGoal, completeGoal, GOALS_INSTRUCTION } from "./goals.js";
+import { getAutoTunePrefix, getTuningStatus } from "./prompt-tuner.js";
 
 const log = createLogger("gateway");
 
@@ -155,6 +158,10 @@ const CMD_REVIEW = /^\/review$/i;
 const CMD_REVIEW_STATS = /^\/review[-_]stats$/i;
 const CMD_STATS = /^\/stats$/i;
 const CMD_HEALTH = /^\/health$/i;
+const CMD_GOALS = /^\/goals$/i;
+const CMD_GOAL_ADD = /^\/goal\s+(?!done\b)(.+)/i;
+const CMD_GOAL_DONE = /^\/goal[-_\s]done\s+(\d+)/i;
+const CMD_TUNE = /^\/tune$/i;
 
 const NO_CREDS_MSG = [
   "No AI credentials configured.",
@@ -1139,7 +1146,10 @@ ${report}` }).catch(() => {});
 
     if (CMD_STATS.test(text)) {
       const { getStatsSummary } = await import("./metrics.js");
-      await channel.send({ threadId: message.threadId, text: getStatsSummary() });
+      const conf = getConfidenceSummary();
+      await channel.send({ threadId: message.threadId, text: conf ? getStatsSummary() + `
+
+${conf}` : getStatsSummary() });
       return;
     }
 
@@ -1147,6 +1157,31 @@ ${report}` }).catch(() => {});
       await channel.send({ threadId: message.threadId, text: "🔍 Running health checks..." });
       const tools = await runHealthChecks();
       await channel.send({ threadId: message.threadId, text: formatHealthReport(tools) });
+      return;
+    }
+
+    if (CMD_GOALS.test(text)) {
+      const goals = listGoals(message.channelId, message.threadId);
+      await channel.send({ threadId: message.threadId, text: formatGoalsList(goals) });
+      return;
+    }
+
+    const goalDoneMatch = CMD_GOAL_DONE.exec(text);
+    if (goalDoneMatch) {
+      const ok = completeGoal(parseInt(goalDoneMatch[1], 10));
+      await channel.send({ threadId: message.threadId, text: ok ? `✅ Goal ${goalDoneMatch[1]} done!` : "Goal not found." });
+      return;
+    }
+
+    const goalAddMatch = CMD_GOAL_ADD.exec(text);
+    if (goalAddMatch) {
+      const g = addGoal(goalAddMatch[1], message.channelId, message.threadId);
+      await channel.send({ threadId: message.threadId, text: `🎯 Goal [${g.id}] added: ${g.text}` });
+      return;
+    }
+
+    if (CMD_TUNE.test(text)) {
+      await channel.send({ threadId: message.threadId, text: getTuningStatus() });
       return;
     }
 
@@ -1171,11 +1206,13 @@ ${report}` }).catch(() => {});
     await this.sessions.ensureWorktree(session);
 
     this.selfAwarenessWorkdir = session.workdir;
-    // Inject LESSONS.md so AI sees accumulated lessons
+    // Inject LESSONS.md and GOALS.md so AI sees accumulated context
     try {
       const lessonsContent = getLessonsContent();
-      const lessonsPath = path.join(session.workdir, "LESSONS.md");
-      fs.writeFileSync(lessonsPath, lessonsContent);
+      fs.writeFileSync(path.join(session.workdir, "LESSONS.md"), lessonsContent);
+    } catch {}
+    try {
+      writeGoalsFile(session.workdir, message.channelId, message.threadId);
     } catch {}
     ensureWorkspaceFiles(session.workdir, {
       channelId: message.channelId,
@@ -1251,6 +1288,7 @@ ${report}` }).catch(() => {});
     );
     this.lastMessageAt.set(threadKey, message.timestamp);
 
+    const autoTunePrefix = getAutoTunePrefix();
     const goesToOpenCode = !(
       intent === "fast" ||
       intent === "computer" ||
@@ -1261,7 +1299,7 @@ ${report}` }).catch(() => {});
 
     const promptMode =
       intent === "computer" ? "computer" : goesToOpenCode ? "code" : "chat";
-    const systemPrompt = buildSystemPrompt({
+    const systemPrompt = (autoTunePrefix ? autoTunePrefix : '') + buildSystemPrompt({
       mode: promptMode,
       channelId: message.channelId,
       senderId: message.senderId,
@@ -1273,7 +1311,7 @@ ${report}` }).catch(() => {});
       timezone: process.env.HYDRA_USER_TIMEZONE,
       currentTime: getCurrentTime(process.env.HYDRA_USER_TIMEZONE),
       includeToolHint: goesToOpenCode,
-    });
+    }) + CONFIDENCE_INSTRUCTION + GOALS_INSTRUCTION;
 
     const contextPrefix = goesToOpenCode
       ? buildMemoryPrompt(message.channelId, message.threadId, true)
