@@ -125,6 +125,7 @@ export class TelegramChannel extends BaseChannel {
       { command: "pending",        description: "List pending pairing requests" },
       { command: "chatgpt_login",  description: "Add a ChatGPT account to the pool" },
       { command: "chatgpt_accounts", description: "List all ChatGPT pool accounts" },
+      { command: "chatgpt_sync",     description: "Sync ChatGPT token from codex CLI on bob" },
       { command: "chatgpt_status", description: "ChatGPT pool status" },
       { command: "providers",      description: "Show all AI providers and routing" },
       { command: "ollama_pull",    description: "Pull an Ollama model (e.g. nemotron-mini)" },

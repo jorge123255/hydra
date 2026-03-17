@@ -280,3 +280,42 @@ export async function callSubagentsParallel(tasks: string[], systemPrompt?: stri
 export function isCodexConfigured(): boolean {
   return isCodexPoolConfigured()
 }
+
+// ─── Sync from ~/.codex/auth.json (set by `codex login` CLI on this machine) ──
+
+export function syncFromCodexCli(label = 'codex-cli'): PoolAccount | null {
+  const authFile = path.join(os.homedir(), '.codex', 'auth.json')
+  if (!fs.existsSync(authFile)) return null
+  try {
+    const data = JSON.parse(fs.readFileSync(authFile, 'utf8'))
+    const tokens = data?.tokens
+    if (!tokens?.access_token) return null
+
+    // Decode expiry from JWT payload
+    let expiresAt = Date.now() + 3600 * 1000
+    try {
+      const payload = JSON.parse(Buffer.from(tokens.access_token.split('.')[1], 'base64').toString())
+      if (payload.exp) expiresAt = payload.exp * 1000
+    } catch {}
+
+    return saveOAuthAccount(label, {
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token,
+      expiresAt,
+    })
+  } catch {
+    return null
+  }
+}
+
+export async function refreshViaCodexCli(label: string): Promise<boolean> {
+  // Run `codex` to trigger a silent token refresh, then re-sync
+  const { execSync } = await import('child_process')
+  try {
+    // codex --version is a quick no-op that triggers auth refresh internally
+    execSync('codex --version', { timeout: 10000, stdio: 'ignore' })
+  } catch {}
+  // Re-read the file
+  const account = syncFromCodexCli(label)
+  return account !== null
+}

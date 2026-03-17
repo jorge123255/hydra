@@ -64,6 +64,7 @@ import {
   startDeviceFlow,
   pollForToken,
   saveOAuthAccount,
+  syncFromCodexCli,
 } from "./auth/codex-pool.js";
 import { ensureWorkspaceFiles, readWorkspaceFiles } from "./workspace.js";
 import { HeartbeatManager, HEARTBEAT_PROMPT } from "./heartbeat.js";
@@ -131,6 +132,7 @@ const CMD_CHATGPT = /^\/chatgpt[-_]login(?:\s+(.+))?$/i;
 const CMD_CHATGPT_STATUS = /^\/chatgpt[-_]status$/i;
 const CMD_CHATGPT_ACCOUNTS = /^\/chatgpt[-_]accounts$/i;
 const CMD_CHATGPT_REMOVE = /^\/chatgpt[-_]remove\s+(\S+)/i;
+const CMD_CHATGPT_SYNC = /^\/chatgpt[-_]sync$/i;
 const CMD_CHATGPT_TOKEN = /^\/chatgpt[-_]token\s+(\S+)\s+(\S+)(?:\s+(\S+))?/i;
 const CMD_CHATGPT_KEY = /^\/chatgpt[-_](?:login|key)\s+(\S+)\s+(sk-\S+)/i;
 const CMD_COPILOT_STATUS = /^\/copilot[-_]status$/i;
@@ -199,6 +201,9 @@ export class Gateway {
     this.startSelfReviewLoop();
     this.startSelfAwarenessRefresh();
     this.startHealthCheckLoop();
+    // Auto-load tokens from codex CLI if available
+    const synced = syncFromCodexCli();
+    if (synced) log.info(`[chatgpt] Auto-synced account "${synced.label}" from ~/.codex/auth.json`);
     const idleMs = this.config.sessionIdleMs ?? 30 * 60 * 1000;
     this.sweepTimer = setInterval(
       () => this.sessions.sweepIdle(idleMs),
@@ -691,6 +696,22 @@ ${report}` }).catch(() => {});
       return;
     }
 
+
+    if (CMD_CHATGPT_SYNC.test(text)) {
+      if (!this.isOwner(message.channelId, message.senderId)) {
+        await channel.send({ threadId: message.threadId, text: "Only the bot owner can sync accounts." });
+        return;
+      }
+      const account = syncFromCodexCli();
+      if (!account) {
+        await channel.send({ threadId: message.threadId, text: "~/.codex/auth.json not found on bob.\n\nRun `codex login` on the Mac Mini terminal first, then /chatgpt_sync." });
+        return;
+      }
+      const accounts = listPoolAccounts();
+      const exp = account.expiresAt ? new Date(account.expiresAt).toISOString().slice(0, 16).replace('T', ' ') : 'unknown';
+      await channel.send({ threadId: message.threadId, text: `✅ Synced "${account.label}" from codex CLI\nToken expires: ${exp} UTC\nPool: ${accounts.length} account(s)` });
+      return;
+    }
 
     if (CMD_CHATGPT_STATUS.test(text)) {
       if (isCodexConfigured()) {
