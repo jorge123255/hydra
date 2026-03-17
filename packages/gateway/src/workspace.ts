@@ -197,7 +197,6 @@ export function ensureWorkspaceFiles(workdir: string, ctx: WorkspaceContext): vo
       'USER.md': buildUserFile(ctx),
       'MEMORY.md': '# Memory\n\n(No notes yet.)\n',
       'HEARTBEAT.md': '# Heartbeat Log\n\n(No check-ins yet.)\n',
-      'SELF.md': writeSelfAwareness(), // Add missing SELF.md generation
     }
 
     for (const [filename, content] of Object.entries(defaults)) {

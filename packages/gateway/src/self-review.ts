@@ -207,8 +207,52 @@ Make at most 1-2 focused improvements. If the file looks good, say so.`
 
   const changed = filesModified.length > 0
 
-  // Push improvements to GitHub
+  // Typecheck before pushing — revert if broken
   if (changed) {
+    log.info(`[self-review] typechecking ${filesModified.length} modified file(s)...`)
+    const affectedPackages = new Set<string>()
+    for (const f of filesModified) {
+      if (f.startsWith('packages/')) affectedPackages.add(f.split('/')[1])
+    }
+    let typecheckPassed = true
+    for (const pkg of affectedPackages) {
+      try {
+        execSync(
+          `cd ${HYDRA_DIR} && pnpm --filter @hydra/${pkg} exec tsc --noEmit`,
+          { encoding: 'utf8', timeout: 60_000 }
+        )
+        log.info(`[self-review] typecheck passed: @hydra/${pkg}`)
+      } catch (tcErr) {
+        const errOut = String(tcErr).slice(0, 500)
+        log.warn(`[self-review] typecheck FAILED for @hydra/${pkg}: ${errOut}`)
+        typecheckPassed = false
+      }
+    }
+
+    if (!typecheckPassed) {
+      // Revert all patched files
+      log.warn(`[self-review] reverting changes due to typecheck failure`)
+      for (const f of filesModified) {
+        try {
+          execSync(`cd ${HYDRA_DIR} && git checkout -- ${f}`, { encoding: 'utf8' })
+          log.info(`[self-review] reverted ${f}`)
+        } catch (e) {
+          log.warn(`[self-review] could not revert ${f}: ${e}`)
+        }
+      }
+      state.lastRunAt = new Date().toISOString()
+      state.lastFileIndex = fileIndex + 1
+      state.totalReviews++
+      saveState(state)
+      return {
+        changed: false,
+        summary: `Reviewed \`${targetFile}\` — patch applied but failed typecheck, reverted.\n${clean.slice(0, 500)}`,
+        filesModified: [],
+        willRestart: false,
+      }
+    }
+
+    // Typecheck passed — push to GitHub
     try {
       const commitMsg = `self-improve: ${targetFile.split('/').pop()} — ${shortSummary.slice(0, 80)}`
       execSync(

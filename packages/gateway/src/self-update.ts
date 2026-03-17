@@ -57,6 +57,10 @@ export function applySaveTag(
   threadId: string
 ): void {
   const { key, value } = tag
+  if (!key || !value || typeof key !== 'string' || typeof value !== 'string') {
+    log.warn(`Invalid save tag: key=${key}, value=${value}`)
+    return
+  }
   log.info(`Self-update: ${key}=${value}`)
 
   switch (key) {
@@ -93,6 +97,10 @@ export function applySaveTag(
  */
 export function scheduleSelfRestart(): void {
   const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', 'ai.hydra.gateway.plist')
+  if (!fs.existsSync(plist)) {
+    log.error(`Cannot restart: launchd plist not found at ${plist}`)
+    return
+  }
   const script = `sleep 2 && launchctl unload "${plist}" && sleep 1 && launchctl load "${plist}"`
   const child = spawn('bash', ['-c', script], {
     detached: true,

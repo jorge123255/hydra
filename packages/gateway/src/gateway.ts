@@ -342,17 +342,23 @@ ${report}` }).catch(() => {});
     const { clean: afterFacts } = extractFactTags(afterDecisions, channelId, threadId);
 
     // Run [BROWSE: url instruction] — agent-initiated browser automation
-    const browseTagPattern = /\[BROWSE:\s*(https?:\/\/\S+)(?:\s+([^\]]+))?\]/gi;
+    const browseTagPattern = /\[BROWSE:\s*(https?:\/\/[^\s\]"]+)(?:\s+([^\]]+))?\]/gi;
     let result = afterFacts;
     const browseMatches = [...afterFacts.matchAll(browseTagPattern)];
     for (const match of browseMatches) {
       const url = match[1].trim();
       const instruction = (match[2] ?? '').trim();
       try {
-        log.info(`[tool:browse] navigating to ${url} — "${instruction}"`);
+        // Normalize wttr.in URLs — always use ?format=3 (plain text, reliable)
+        let resolvedUrl = url;
+        if (resolvedUrl.includes('wttr.in/')) {
+          const wttrBase = resolvedUrl.split('?')[0];
+          resolvedUrl = `${wttrBase}?format=3`;
+        }
+        log.info(`[tool:browse] navigating to ${resolvedUrl} — "${instruction}"`);
         const { navigate, ariaSnapshot, currentUrl: getUrl, evaluate: pageEval } = await import('@hydra/computer-use');
         const { callDirect } = await import('./copilot-chat.js');
-        await navigate(url);
+        await navigate(resolvedUrl);
 
         // Get page content — try body text first (works for plain text/data pages),
         // fall back to ARIA snapshot (works for rich HTML)
@@ -1752,6 +1758,10 @@ ${conf}` : getStatsSummary() });
     try {
       const { navigate, ariaSnapshot, browserScreenshot, parseBrowseAction, executeBrowseAction, currentUrl } = await import('@hydra/computer-use');
 
+      // Normalize wttr.in to reliable format
+      if (url.includes('wttr.in/')) {
+        url = url.split('?')[0] + '?format=3';
+      }
       // Step 1: navigate
       await channel.editMessage(message.threadId, placeholderId, `🌐 navigating to ${url}...`).catch(() => {});
       const title = await navigate(url);

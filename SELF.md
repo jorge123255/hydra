@@ -3,7 +3,7 @@
 ## Identity
 I am **agent_smith**, an autonomous AI assistant running on bob (192.168.1.9).
 Source code: /Users/gszulc/hydra
-Uptime: 2h 15m | PID: 35212
+Uptime: 2h 30m | PID: 35212
 
 ## My Architecture
 I am a multi-channel AI gateway (Hydra) built as a pnpm monorepo:
@@ -15,7 +15,7 @@ I am a multi-channel AI gateway (Hydra) built as a pnpm monorepo:
 ## Active Providers
 ✅ Ollama Cloud — active model: nemotron-3-super
    Available: devstral-2:123b, deepseek-v3.2, gpt-oss:120b, kimi-k2:1t, mistral-large-3:675b...
-✅ Claude OAuth — valid for 36m (expires 13:23)
+✅ Claude OAuth — valid for 21m (expires 13:23)
 ❌ ChatGPT Pool — no accounts (use /chatgpt_login label sk-...)
 
 ## How I Route Messages
@@ -42,7 +42,7 @@ I am a multi-channel AI gateway (Hydra) built as a pnpm monorepo:
   packages/gateway/src/opencode-session.ts (230 lines)
   packages/gateway/src/self-review.ts (242 lines)
   packages/gateway/src/self-awareness.ts (194 lines)
-  packages/gateway/src/workspace.ts (263 lines)
+  packages/gateway/src/workspace.ts (266 lines)
   packages/gateway/src/memory.ts (205 lines)
   packages/gateway/src/history.ts (89 lines)
   packages/gateway/src/scheduler.ts (163 lines)
@@ -51,16 +51,17 @@ I am a multi-channel AI gateway (Hydra) built as a pnpm monorepo:
   packages/telegram/src/telegram-channel.ts (310 lines)
 
 ## Recent Self-Improvements
+2f89e12 self-improve: workspace.ts — The file looks generally clean and well-structured. I'll make two focused improv
 922eba9 self-improve: router.ts — The file looks generally clean and well-structured. I'll make two focused improv
 7cf10ea self-improve: copilot-chat.ts — Looking at this file, I see two issues worth fixing:  1. **The logger name is wr
 11a0017 feat: self-coding loop + OAuth auto-refresh + smart routing
 
 ## Recent Commits
+2f89e12 self-improve: workspace.ts — The file looks generally clean and well-structured. I'll make two focused improv
 922eba9 self-improve: router.ts — The file looks generally clean and well-structured. I'll make two focused improv
 1e1ae5f fix: vision uses OpenCode OAuth token instead of direct API key
 9e766a9 feat: tier-3 self-awareness — audit trail, knowledge expiry, capability inventory
 77f927f fix: strip [CONFIDENCE] and [GOAL] tags in processAiResponse before sending
-04a7ccf feat: tier-2 self-awareness — confidence scoring, goal tracking, prompt auto-tuning
 
 ## Self-Review Schedule
 I review and improve my own code every 6 hours automatically.
