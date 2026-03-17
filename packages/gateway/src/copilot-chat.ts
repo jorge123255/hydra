@@ -294,7 +294,13 @@ export async function callDirect(
     throw new Error('Vision requires Claude or Copilot — no vision-capable provider configured')
   }
 
-  // If a specific Ollama model is requested for this intent, use it directly
+  // Priority 1: Claude (primary — auto-refreshes OAuth token)
+  if (isClaudeConfigured()) {
+    log.debug('Routing to Claude')
+    return callClaudeDirect(prompt, images, systemPrompt)
+  }
+
+  // Priority 2: Specific Ollama model requested (subagent routing)
   if (ollamaModelOverride && process.env.OLLAMA_DISABLED !== 'true') {
     const ollamaReady = await isOllamaAvailable()
     if (ollamaReady) {
@@ -303,7 +309,7 @@ export async function callDirect(
     }
   }
 
-  // Text chat: try Ollama with default model
+  // Priority 3: Ollama default model
   if (process.env.OLLAMA_DISABLED !== 'true') {
     const ollamaReady = await isOllamaAvailable()
     if (ollamaReady) {
@@ -312,12 +318,11 @@ export async function callDirect(
     }
   }
 
-  // Fallback chain: subagent pool → Claude OAuth → Codex → Copilot
+  // Priority 4: ChatGPT subagent pool → Codex → Copilot
   if (isCodexPoolConfigured()) {
     log.debug('Routing to ChatGPT subagent pool')
     return callSubagent(prompt, systemPrompt)
   }
-  if (isClaudeConfigured()) return callClaudeDirect(prompt, images, systemPrompt)
   const { isCodexConfigured, callCodexDirect } = await import('./auth/chatgpt-codex.js')
   if (isCodexConfigured()) return callCodexDirect(prompt, images, systemPrompt)
   return callCopilotDirect(prompt, images, systemPrompt)
