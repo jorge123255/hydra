@@ -298,40 +298,26 @@ Make at most 1-2 focused improvements. If the file looks good, say so.${instruct
     let analysis = ''
     const analyzePrompt = `${basePrompt}\n\nIdentify the top issues only — do NOT write code fixes yet.`
 
-    if (isClaudeConfigured()) {
-      log.info('[self-review] stage 1: analyzing with claude-opus-4-5')
-      try {
-        analysis = await callClaudeDirect(analyzePrompt, undefined, ANALYZE_SYSTEM, 'claude-opus-4-5')
-        log.info(`[self-review] analysis: ${analysis.slice(0, 120).replace(/\n/g, ' ')}`)
-      } catch (e) {
-        log.warn(`[self-review] opus analysis failed (${e}) — skipping to single-stage`)
-      }
-    } else {
-      log.info('[self-review] stage 1: analyzing with nemotron-3-super')
-      try {
-        analysis = await callOllama(analyzePrompt, ANALYZE_SYSTEM, 'nemotron-3-super')
-        log.info(`[self-review] nemotron analysis: ${analysis.slice(0, 120).replace(/\n/g, ' ')}`)
-      } catch (e) {
-        log.warn(`[self-review] nemotron analysis failed (${e}) — skipping`)
-      }
+    // Stage 1: analyze with nemotron (fast, free, no expired token issues)
+    log.info('[self-review] stage 1: analyzing with nemotron-3-super')
+    try {
+      analysis = await callOllama(analyzePrompt, ANALYZE_SYSTEM, 'nemotron-3-super')
+      log.info(`[self-review] nemotron analysis: ${analysis.slice(0, 120).replace(/\n/g, ' ')}`)
+    } catch (e) {
+      log.warn(`[self-review] nemotron analysis failed (${e}) — skipping to single-stage`)
     }
 
-    // Stage 2: Implementation — devstral writes the fix based on analysis
+    // Stage 2: devstral writes the fix
     const implementPrompt = analysis
-      ? `${basePrompt}\n\n## Analysis from senior reviewer:\n${analysis}\n\nNow implement fixes for the top issue(s) identified above using REPLACE blocks.`
+      ? `${basePrompt}\n\n## Analysis:\n${analysis}\n\nNow implement fixes for the top issue(s) using REPLACE blocks.`
       : basePrompt
 
-    log.info('[self-review] stage 2: implementing with devstral-2:123b')
+    log.info('[self-review] stage 2: implementing with devstral-small-2:24b')
     try {
-      response = await callOllama(implementPrompt, REVIEW_SYSTEM, 'devstral-2:123b')
+      response = await callOllama(implementPrompt, REVIEW_SYSTEM, 'devstral-small-2:24b')
     } catch (devstralErr) {
-      log.warn(`[self-review] devstral failed (${devstralErr}) — trying claude`)
-      try {
-        response = await callClaudeDirect(implementPrompt, undefined, REVIEW_SYSTEM, 'claude-sonnet-4-5')
-      } catch (claudeErr) {
-        log.warn(`[self-review] claude failed (${claudeErr}) — falling back to ChatGPT pool`)
-        response = await callDirect(implementPrompt, undefined, REVIEW_SYSTEM)
-      }
+      log.warn(`[self-review] devstral failed (${devstralErr}) — falling back to ChatGPT pool`)
+      response = await callDirect(implementPrompt, undefined, REVIEW_SYSTEM)
     }
   } catch (e) {
     log.error(`[self-review] AI call failed: ${e}`)

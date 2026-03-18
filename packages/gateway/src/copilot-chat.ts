@@ -130,6 +130,7 @@ async function getOpenCodeAuth(): Promise<AnthropicAuth | null> {
 }
 
 async function resolveAnthropicAuth(): Promise<AnthropicAuth | null> {
+  if (process.env.HYDRA_DISABLE_CLAUDE === 'true') return null
   const envKey = process.env.ANTHROPIC_API_KEY
   if (envKey) return { token: envKey, isOAuth: envKey.startsWith('sk-ant-oat') }
   // Use async version — auto-refreshes expired token via refresh_token
@@ -143,6 +144,7 @@ export function getVisionUsageStatus(): { count: number; budget: number; remaini
 }
 
 export function isClaudeConfigured(): boolean {
+  if (process.env.HYDRA_DISABLE_CLAUDE === 'true') return false
   if (process.env.ANTHROPIC_API_KEY) return true
   if (getValidClaudeToken()) return true
   try {
