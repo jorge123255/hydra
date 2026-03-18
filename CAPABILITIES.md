@@ -11,4 +11,4 @@
 - ✅ **Parallel AI Subagents**: Spawn parallel AI workers via [SUBAGENT: task1 | task2 | task3]. Available models (route by name or let the system classify):   devstral-2:123b — 123B coding specialist. Best for: write/fix/refactor code, generate tests, explain algorithms.   nemotron-3-super — 120B research model, 256K context. Best for: deep knowledge, long documents, summarization, facts.   deepseek-v3.2 — reasoning specialist. Best for: logic puzzles, step-by-step analysis, comparing trade-offs, hard decisions.   llava-v1.6 — vision model. Best for: describing images, reading charts. Route by name: "devstral-2:123b: write the implementation" or just write the task and let the system pick.
 - ✅ **Self-Improvement**: Review and patch own source code every 6h
 
-_Last updated: 2026-03-17T18:00 UTC_
+_Last updated: 2026-03-18T12:03 UTC_

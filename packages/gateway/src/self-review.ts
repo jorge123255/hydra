@@ -43,6 +43,9 @@ type ReviewState = {
   totalReviews: number
   improvements: string[]  // last 10 improvement summaries
   lastErrorCount: number  // error count at last run (for spike detection)
+  lastReviewedFile?: string
+  consecutiveReviews?: number
+  outcomeLog?: Array<{ file: string; changed: boolean; errorsBefore: number; errorsAfter?: number; ts: string }>
 }
 
 function loadState(): ReviewState {
@@ -143,7 +146,9 @@ function getErrorCountLastHour(): number {
         if (new Date(tsMatch[1]).getTime() < cutoff) continue
       } catch { /* skip unparseable timestamps */ }
     }
-    if (/ERROR|TypeError|ReferenceError|failed|crashed/i.test(line)) count++
+    // Exclude self-review's own warn/error lines to avoid feedback loops
+    if (/ERROR|TypeError|ReferenceError|failed|crashed/i.test(line) &&
+        !/\[self-review\]/.test(line)) count++
   }
   return count
 }
@@ -168,7 +173,8 @@ function readLessons(): string {
  */
 export function shouldRunNow(): string | null {
   const errCount = getErrorCountLastHour()
-  if (errCount >= 10) return `error spike (${errCount} errors in last hour)`
+  // Threshold of 50 avoids self-triggering on self-review's own warn/error lines
+  if (errCount >= 50) return `error spike (${errCount} errors in last hour)`
 
   try {
     const recent = execSync(
@@ -232,8 +238,16 @@ export async function runSelfReview(triggerWorkdir?: string, instructions?: stri
   const state = loadState()
 
   // ── 1. Log-driven file selection ──────────────────────────────────────────
+  // Cap how many consecutive reviews can target the same file (prevents gateway.ts monopoly)
+  const MAX_CONSECUTIVE = 2
   const rankedFiles = rankFilesByErrors(state.lastFileIndex % REVIEW_FILES.length)
-  const targetFile = rankedFiles[0]
+  let targetFile = rankedFiles[0]
+  if (state.lastReviewedFile === targetFile && (state.consecutiveReviews ?? 0) >= MAX_CONSECUTIVE) {
+    // Force round-robin to next file
+    const currentIdx = REVIEW_FILES.indexOf(targetFile)
+    targetFile = REVIEW_FILES[(currentIdx + 1) % REVIEW_FILES.length]
+    log.info(`[self-review] skipping ${rankedFiles[0]} (reviewed ${MAX_CONSECUTIVE}x in a row) → ${targetFile}`)
+  }
   const fileIndex = REVIEW_FILES.indexOf(targetFile) >= 0
     ? REVIEW_FILES.indexOf(targetFile)
     : state.lastFileIndex % REVIEW_FILES.length
@@ -285,9 +299,9 @@ Make at most 1-2 focused improvements. If the file looks good, say so.${instruct
     const analyzePrompt = `${basePrompt}\n\nIdentify the top issues only — do NOT write code fixes yet.`
 
     if (isClaudeConfigured()) {
-      log.info('[self-review] stage 1: analyzing with claude-opus-4-6')
+      log.info('[self-review] stage 1: analyzing with claude-opus-4-5')
       try {
-        analysis = await callClaudeDirect(analyzePrompt, undefined, ANALYZE_SYSTEM, 'claude-opus-4-6')
+        analysis = await callClaudeDirect(analyzePrompt, undefined, ANALYZE_SYSTEM, 'claude-opus-4-5')
         log.info(`[self-review] analysis: ${analysis.slice(0, 120).replace(/\n/g, ' ')}`)
       } catch (e) {
         log.warn(`[self-review] opus analysis failed (${e}) — skipping to single-stage`)
@@ -313,7 +327,7 @@ Make at most 1-2 focused improvements. If the file looks good, say so.${instruct
     } catch (devstralErr) {
       log.warn(`[self-review] devstral failed (${devstralErr}) — trying claude`)
       try {
-        response = await callClaudeDirect(implementPrompt, undefined, REVIEW_SYSTEM, 'claude-sonnet-4-6')
+        response = await callClaudeDirect(implementPrompt, undefined, REVIEW_SYSTEM, 'claude-sonnet-4-5')
       } catch (claudeErr) {
         log.warn(`[self-review] claude failed (${claudeErr}) — falling back to ChatGPT pool`)
         response = await callDirect(implementPrompt, undefined, REVIEW_SYSTEM)
@@ -348,11 +362,32 @@ Make at most 1-2 focused improvements. If the file looks good, say so.${instruct
         continue
       }
       const original = fs.readFileSync(fullPath, 'utf8')
+      // Try exact match first, then normalised-whitespace match
+      let actualFind = findText
       if (!original.includes(findText)) {
-        log.warn(`[self-review] FIND text not found in ${filePath} — skipping`)
-        continue
+        // Normalise: collapse runs of spaces/tabs on each line, trim leading/trailing blank lines
+        const normalise = (s: string) => s.split('\n').map(l => l.replace(/\t/g, '  ').trimEnd()).join('\n').trim()
+        const normOriginal = normalise(original)
+        const normFind = normalise(findText)
+        if (!normOriginal.includes(normFind)) {
+          log.warn(`[self-review] FIND text not found in ${filePath} — skipping`)
+          continue
+        }
+        // Reconstruct the real find text by locating the matching region
+        const idx = normOriginal.indexOf(normFind)
+        const lines = original.split('\n')
+        let charCount = 0
+        let startLine = 0
+        for (let i = 0; i < lines.length; i++) {
+          const normLine = lines[i].replace(/\t/g, '  ').trimEnd()
+          if (charCount + normLine.length + 1 > idx) { startLine = i; break }
+          charCount += normLine.length + 1
+        }
+        const findLines = normFind.split('\n').length
+        actualFind = lines.slice(startLine, startLine + findLines).join('\n')
+        log.info(`[self-review] fuzzy FIND matched in ${filePath} (line ${startLine + 1})`)
       }
-      fs.writeFileSync(fullPath, original.replace(findText, replaceText))
+      fs.writeFileSync(fullPath, original.replace(actualFind, replaceText))
       filesModified.push(filePath)
       log.info(`[self-review] patched ${filePath}`)
     } catch (e) {
@@ -366,15 +401,27 @@ Make at most 1-2 focused improvements. If the file looks good, say so.${instruct
   }
 
   // Update state
+  const errorsNow = getErrorCountLastHour()
   state.lastRunAt = new Date().toISOString()
   state.lastFileIndex = (fileIndex + 1) % REVIEW_FILES.length
   state.totalReviews++
   const shortSummary = clean.slice(0, 200).replace(/\n/g, ' ')
   state.improvements = [shortSummary, ...state.improvements].slice(0, 10)
-  state.lastErrorCount = getErrorCountLastHour()
-  saveState(state)
-
+  // Track consecutive reviews on the same file
+  if (state.lastReviewedFile === targetFile) {
+    state.consecutiveReviews = (state.consecutiveReviews ?? 0) + 1
+  } else {
+    state.consecutiveReviews = 1
+  }
   const changed = filesModified.length > 0
+
+  state.lastReviewedFile = targetFile
+  // Outcome log — record errors before/after for each review
+  state.outcomeLog = state.outcomeLog ?? []
+  state.outcomeLog.unshift({ file: targetFile, changed, errorsBefore: state.lastErrorCount, ts: state.lastRunAt })
+  state.outcomeLog = state.outcomeLog.slice(0, 20)
+  state.lastErrorCount = errorsNow
+  saveState(state)
 
   // ── 4+5. Typecheck + runtime check before pushing ─────────────────────────
   if (changed) {

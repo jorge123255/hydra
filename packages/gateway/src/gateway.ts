@@ -93,6 +93,8 @@ import { getAutoTunePrefix, getTuningStatus } from "./prompt-tuner.js";
 import { logAudit, extractDecisionTags, getRecentAudit, formatAuditLog, DECISION_INSTRUCTION } from "./audit.js";
 import { extractFactTags, writeFactsFile, listActiveFacts, formatFactsList, startFactSweepLoop, FACTS_INSTRUCTION } from "./knowledge.js";
 import { buildCapabilities, formatCapabilities, writeCapabilitiesFile } from "./capabilities.js";
+import { runSelfEvolve, getEvolveStats, logConversationTurn } from "./self-evolve.js";
+import { maybeUpdateMemory, getMemoryWriteLog } from "./memory-writer.js";
 
 const log = createLogger("gateway");
 
@@ -161,6 +163,9 @@ const CMD_RESTART    = /^\/restart$/i
 const CMD_PING = /^\/ping$/i;
 const CMD_REVIEW = /^\/review(?:\s+(.+))?$/i;
 const CMD_REVIEW_STATS = /^\/review[-_]stats$/i;
+const CMD_EVOLVE = /^\/evolve(?:\s+(.+))?$/i;
+const CMD_EVOLVE_LOG = /^\/evolve[-_]log$/i;
+const CMD_MEMORY_LOG = /^\/memory[-_]log$/i;
 const CMD_STATS = /^\/stats$/i;
 const CMD_HEALTH = /^\/health$/i;
 const CMD_GOALS = /^\/goals$/i;
@@ -215,6 +220,7 @@ export class Gateway {
     this.scheduler.start();
     this.heartbeat.start();
     this.startSelfReviewLoop();
+    this.startSelfEvolveLoop();
     this.startSelfAwarenessRefresh();
     this.startHealthCheckLoop();
     startFactSweepLoop();
@@ -306,10 +312,37 @@ ${report}` }).catch(() => {});
     }, intervalMs);
   }
 
+  private selfEvolveTimer?: NodeJS.Timeout;
+
+  private startSelfEvolveLoop(): void {
+    const intervalHours = parseInt(process.env.HYDRA_EVOLVE_INTERVAL_HOURS ?? '12', 10)
+    if (intervalHours <= 0) return
+    const intervalMs = intervalHours * 60 * 60 * 1000
+    log.info(`[self-evolve] evolution loop: every ${intervalHours}h`)
+    this.selfEvolveTimer = setInterval(async () => {
+      log.info('[self-evolve] scheduled evolution starting')
+      try {
+        const result = await runSelfEvolve()
+        if (!result.built) return
+        const ownerIds = (process.env.HYDRA_OWNER_IDS ?? '').split(',').filter(Boolean)
+        for (const ownerId of ownerIds) {
+          const parts = ownerId.split(':')
+          const [channelId, senderId] = parts.length === 2 ? parts : ['telegram', parts[0]]
+          const channel = this.registry.get(channelId as any)
+          if (!channel) continue
+          await channel.send({ threadId: senderId, text: `🧬 I built something new!\n\n${result.summary}`.slice(0, 3800) }).catch(() => {})
+        }
+      } catch (e) {
+        log.error(`[self-evolve] evolution run failed: ${e}`)
+      }
+    }, intervalMs)
+  }
+
   async stop(): Promise<void> {
     log.info("Stopping Hydra gateway...");
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     if (this.selfReviewTimer) clearInterval(this.selfReviewTimer);
+    if (this.selfEvolveTimer) clearInterval(this.selfEvolveTimer);
     this.scheduler.stop();
     this.heartbeat.stop();
     for (const [, ctrl] of this.activeRuns) ctrl.abort();
@@ -1286,6 +1319,47 @@ ${report}` }).catch(() => {});
       return;
     }
 
+    // /evolve [hint] — trigger self-evolution run
+    const evolveMatch = text.match(CMD_EVOLVE);
+    if (evolveMatch) {
+      if (!this.isOwner(message.channelId, message.senderId)) { await channel.send({ threadId: message.threadId, text: '🔒 Owner only.' }); return; }
+      const hint = evolveMatch[1] ? ` (focus: ${evolveMatch[1]})` : '';
+      await channel.send({ threadId: message.threadId, text: `🧬 Starting self-evolution${hint}... this may take a few minutes.` });
+      try {
+        const result = await runSelfEvolve(evolveMatch[1]);
+        await channel.send({ threadId: message.threadId, text: result.summary.slice(0, 3800) });
+      } catch (e) {
+        await channel.send({ threadId: message.threadId, text: `❌ Evolution failed: ${e}` });
+      }
+      return;
+    }
+
+    // /evolve-log — show evolution history
+    if (CMD_EVOLVE_LOG.test(text)) {
+      const stats = getEvolveStats();
+      const logPath = `${os.homedir()}/.hydra/self-evolve.log`;
+      let recentLog = '';
+      try { recentLog = fs.readFileSync(logPath, 'utf8').trim().split('\n').slice(-10).join('\n'); } catch { recentLog = '(no log yet)'; }
+      const lines = [`🧬 Self-Evolution Stats`, `Total builds: ${stats.totalBuilds}`, `Last run: ${stats.lastRunAt}`, '', 'Recent builds:', ...(stats.recentBuilds.length ? stats.recentBuilds.map((s, i) => `${i + 1}. ${s}`) : ['(none yet)']), '', 'Activity log (last 10):', recentLog];
+      await channel.send({ threadId: message.threadId, text: lines.join('\n').slice(0, 3800) });
+      return;
+    }
+
+    // /memory-log — show auto-learned memory
+    if (CMD_MEMORY_LOG.test(text)) {
+      const writes = getMemoryWriteLog(15);
+      const memPath = path.join(process.env.HYDRA_WORKDIR ?? '/Users/gszulc/hydra', 'MEMORY.md');
+      let autoSection = '';
+      try {
+        const mem = fs.readFileSync(memPath, 'utf8');
+        const idx = mem.indexOf('## Auto-learned');
+        autoSection = idx !== -1 ? mem.slice(idx).slice(0, 1500) : '(nothing auto-learned yet)';
+      } catch { autoSection = '(memory file not found)'; }
+      const out = [`🧠 What I've learned from conversations:`, '', autoSection, '', writes.length ? `Last ${writes.length} memory writes:` : '(no writes yet)', ...writes.slice(-8)];
+      await channel.send({ threadId: message.threadId, text: out.join('\n').slice(0, 3800) });
+      return;
+    }
+
     // Extract feedback/corrections before routing to AI
     const prevBot = undefined; // future: pass last bot message
     extractFeedback(message.senderId, message.channelId, text, prevBot);
@@ -1511,6 +1585,7 @@ ${conf}` : getStatsSummary() });
       message.senderName ?? "user",
       prompt,
     );
+    logConversationTurn('user', prompt, message.channelId);
 
     // Fetch web content for any URLs in the message (non-blocking with 15s timeout)
     const urls = extractUrls(prompt);
@@ -1625,6 +1700,12 @@ ${conf}` : getStatsSummary() });
         process.env.HYDRA_BOT_NAME ?? "agent_smith",
         finalText,
       );
+      logConversationTurn('bot', finalText, message.channelId);
+      // Background: maybe learn something from this exchange
+      {
+        const _userMsg = prompt; const _botReply = finalText; const _threadKey = `${message.channelId}:${message.threadId}`;
+        import('./auth/ollama.js').then(({ callOllama }) => { maybeUpdateMemory(_threadKey, _userMsg, _botReply, callOllama) }).catch(() => {})
+      }
 
       if (finalText.trim() === NO_REPLY || finalText.trim() === HEARTBEAT_OK) {
         if (placeholderId)
