@@ -53,7 +53,7 @@ const log = createLogger('claude-auth')
 const OPENCODE_AUTH_FILE = path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json')
 const ANTHROPIC_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token'
 const ANTHROPIC_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
-const OAUTH_BETA_HEADERS = 'claude-code-20250219,oauth-2025-04-20'
+const OAUTH_BETA_HEADERS = 'claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14'
 
 type AnthropicAuth = { token: string; isOAuth: boolean }
 
@@ -227,6 +227,12 @@ export async function callClaudeDirect(
   if (!res.ok) {
     const body = await res.text().catch(() => '')
     if (res.status === 401) _openCodeCache = null
+    // 400 with a specific model override = model not available on this plan
+    // Fall back to haiku automatically
+    if (res.status === 400 && modelOverride && modelOverride !== 'claude-haiku-4-5-20251001') {
+      log.warn(`Model ${modelOverride} not available (400) — falling back to claude-haiku-4-5-20251001`)
+      return callClaudeDirect(prompt, images, systemPrompt, 'claude-haiku-4-5-20251001')
+    }
     throw new Error(`Anthropic API error ${res.status}: ${body.slice(0, 300)}`)
   }
 
