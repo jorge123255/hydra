@@ -113,11 +113,16 @@ async function getOpenCodeAuth(): Promise<AnthropicAuth | null> {
       access = refreshed.access
       refresh = refreshed.refresh
       expires = refreshed.expires
-      fs.writeFileSync(
-        OPENCODE_AUTH_FILE,
-        JSON.stringify({ anthropic: { type: 'oauth', access, refresh, expires } }, null, 2)
-      )
-      log.info('OpenCode OAuth token refreshed and saved')
+      try {
+        fs.writeFileSync(
+          OPENCODE_AUTH_FILE,
+          JSON.stringify({ anthropic: { type: 'oauth', access, refresh, expires } }, null, 2)
+        )
+        log.info('OpenCode OAuth token refreshed and saved')
+      } catch (e) {
+        log.error(`Failed to save refreshed OpenCode token: ${e}`)
+        return null
+      }
     }
 
     const auth: AnthropicAuth = { token: access, isOAuth: true }
