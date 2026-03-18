@@ -292,7 +292,14 @@ ${lessons.slice(0, 800)}
 ## Architecture (so you know how to integrate new code)
 ${arch}
 
-${instructions ? `## George's Instructions for This Run\n${instructions}\n` : ''}
+${instructions ? `## George's Instructions for This Run\n${instructions}\n` : !recentConversations.trim() ? `## Note: No conversation history yet
+Since there's no conversation history to reflect on, build something concretely useful based on who George is:
+- Security engineer → security digest, CVE alerts, or /scan command
+- Cameras at home → smart snapshot command with vision analysis
+- CISSP studying → /cissp quiz command
+- n8n automation → /workflows list/status command
+Pick the one that's most immediately useful and build it fully.
+` : ''}
 
 ---
 
@@ -313,9 +320,10 @@ State what you noticed that led you to this idea. Then build it completely — r
   try {
     const { callClaudeDirect, isClaudeConfigured, callOllama } = await import('./copilot-chat.js')
 
-    // Always use devstral — Claude OAuth is unreliable, devstral is free and local
-    log.info('[self-evolve] planning with devstral-2:123b')
-    response = await callOllama(prompt, EVOLVE_SYSTEM, 'devstral-2:123b')
+    // Use smaller/faster devstral for quicker turnaround
+    const evolveModel = process.env.HYDRA_EVOLVE_MODEL ?? 'devstral-small-2:24b'
+    log.info(`[self-evolve] planning with ${evolveModel}`)
+    response = await callOllama(prompt, EVOLVE_SYSTEM, evolveModel)
   } catch (e) {
     log.error(`[self-evolve] AI call failed: ${e}`)
     return { built: false, feature: 'unknown', filesCreated: [], filesModified: [], willRestart: false, summary: `Evolution failed: ${e}` }
@@ -470,7 +478,8 @@ ${brokenFiles}
 Output ONLY the fix blocks using the same <<<REPLACE: path>>> FIND/REPLACE_WITH format. Nothing else.`
 
         const { callOllama } = await import('./auth/ollama.js')
-        const fixResponse = await callOllama(fixPrompt, EVOLVE_SYSTEM, 'devstral-2:123b')
+        const evolveModel = process.env.HYDRA_EVOLVE_MODEL ?? 'devstral-small-2:24b'
+        const fixResponse = await callOllama(fixPrompt, EVOLVE_SYSTEM, evolveModel)
 
         // Apply fix REPLACE blocks
         const FIX_REPLACE_RE = /<<<REPLACE:\s*([^>]+)>>>\s*\nFIND:\n([\s\S]*?)\nREPLACE_WITH:\n([\s\S]*?)<<<END_REPLACE>>>/g
