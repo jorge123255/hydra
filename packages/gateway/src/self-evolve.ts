@@ -302,17 +302,22 @@ Pick the one that's most immediately useful and build it fully.
 
 ---
 
-**Now: think like a person reflecting on their week.**
+Based on the above, build ONE useful feature RIGHT NOW.
 
-Look at the conversations. What did George ask that you fumbled? What did you say "I can't do that" to? What felt slow or clunky? What would have made those interactions better?
+Output ONLY:
+1. One line: FEATURE: <name>
+2. Immediately followed by code blocks (<<<CREATE:>>> or <<<REPLACE:>>>)
+3. End with <<<RESTART>>>
 
-Look at the errors. What keeps breaking? What's a recurring pain?
+DO NOT write analysis paragraphs. DO NOT ask questions. DO NOT explain what you're going to do.
+JUST OUTPUT THE CODE BLOCKS NOW.
 
-Look at who George is — security engineer, automation lover, has cameras, n8n, Ollama, CISSP studying. What would genuinely delight him that he hasn't even thought to ask for?
-
-Pick ONE thing to build. Not from any list — from your own judgment.
-
-State what you noticed that led you to this idea. Then build it completely — real working code, integrated end to end.`
+Example of correct output format:
+FEATURE: cissp-quiz
+<<<CREATE: packages/gateway/src/cissp-quiz.ts>>>
+export function getCISSPQuestion() { return { q: "What is ALE?", a: "SLE × ARO" } }
+<<<END_CREATE>>>
+<<<RESTART>>>`
 
   // ── Call AI ───────────────────────────────────────────────────────────────
   let response = ''
