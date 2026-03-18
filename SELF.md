@@ -3,7 +3,7 @@
 ## Identity
 I am **agent_smith**, an autonomous AI assistant running on bob (192.168.1.9).
 Source code: /Users/gszulc/hydra
-Uptime: 15m | PID: 60560
+Uptime: 6h 0m | PID: 65399
 
 ## My Architecture
 I am a multi-channel AI gateway (Hydra) built as a pnpm monorepo:
@@ -15,7 +15,7 @@ I am a multi-channel AI gateway (Hydra) built as a pnpm monorepo:
 ## Active Providers
 ✅ Ollama Cloud — active model: nemotron-3-super
    Available: devstral-2:123b, deepseek-v3.2, gpt-oss:120b, kimi-k2:1t, mistral-large-3:675b...
-⚠️  Claude OAuth — expired, auto-refreshing (refresh token present)
+✅ Claude OAuth — valid for 33m (expires 16:13)
 ❌ ChatGPT Pool — no accounts (use /chatgpt_login label sk-...)
 
 ## How I Route Messages
@@ -36,11 +36,11 @@ I am a multi-channel AI gateway (Hydra) built as a pnpm monorepo:
 /ollama_pull /diff /rollback /computer /restart /ping
 
 ## My Source Files
-  packages/gateway/src/gateway.ts (2062 lines)
-  packages/gateway/src/copilot-chat.ts (407 lines)
+  packages/gateway/src/gateway.ts (2153 lines)
+  packages/gateway/src/copilot-chat.ts (420 lines)
   packages/gateway/src/router.ts (80 lines)
   packages/gateway/src/opencode-session.ts (230 lines)
-  packages/gateway/src/self-review.ts (519 lines)
+  packages/gateway/src/self-review.ts (505 lines)
   packages/gateway/src/self-awareness.ts (194 lines)
   packages/gateway/src/workspace.ts (265 lines)
   packages/gateway/src/memory.ts (205 lines)
@@ -51,6 +51,8 @@ I am a multi-channel AI gateway (Hydra) built as a pnpm monorepo:
   packages/telegram/src/telegram-channel.ts (310 lines)
 
 ## Recent Self-Improvements
+16e02e7 self-improve: gateway.ts — I'll review the file and implement focused improvements for the identified issue
+74d6a1b self-improve: copilot-chat.ts — I'll review the file and implement focused improvements for the identified issue
 ba8c688 self-improve: self-update.ts — The file looks generally clean and well-structured. I'll make two focused improv
 2f89e12 self-improve: workspace.ts — The file looks generally clean and well-structured. I'll make two focused improv
 922eba9 self-improve: router.ts — The file looks generally clean and well-structured. I'll make two focused improv
@@ -58,11 +60,11 @@ ba8c688 self-improve: self-update.ts — The file looks generally clean and well
 11a0017 feat: self-coding loop + OAuth auto-refresh + smart routing
 
 ## Recent Commits
-c5c23e5 feat: multi-agent collaboration — critic+reviser pipeline, [CONSULT:] tag for agent-to-agent dialogue
-0ecf072 fix: restore original model names (devstral-2:123b, nemotron-3-super all on Ollama Cloud)
-6fc4d89 fix: Claude first in routing, remove Ollama as default
-5917370 feat: Claude OAuth auto-refresh using refresh_token — no more manual /claude-login needed
-a5a8df5 fix: point Ollama to Unraid cloud (192.168.1.10:11434), remap models to available qwen3/qwen2.5-coder
+1ffc757 fix: fallback to haiku when selected model returns 400 (not available on plan)
+16e02e7 self-improve: gateway.ts — I'll review the file and implement focused improvements for the identified issue
+5506a2e fix: Claude OAuth tokens refreshed, default model = haiku-4-5 (works with this plan)
+74d6a1b self-improve: copilot-chat.ts — I'll review the file and implement focused improvements for the identified issue
+75aeaeb fix: HYDRA_DISABLE_CLAUDE=true bypasses expired OAuth, use nemotron for self-review stage 1
 
 ## Self-Review Schedule
 I review and improve my own code every 6 hours automatically.

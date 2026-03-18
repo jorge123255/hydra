@@ -226,7 +226,10 @@ export async function callClaudeDirect(
 
   if (!res.ok) {
     const body = await res.text().catch(() => '')
-    if (res.status === 401) _openCodeCache = null
+    // Only invalidate OpenCode cache if we're using OAuth and got a 401
+    if (res.status === 401 && auth.isOAuth) {
+      _openCodeCache = null
+    }
     // 400 with a specific model override = model not available on this plan
     // Fall back to haiku automatically
     if (res.status === 400 && modelOverride && modelOverride !== 'claude-haiku-4-5-20251001') {
@@ -258,23 +261,32 @@ export async function callCopilotDirect(
   }
   content.push({ type: 'text', text: prompt })
 
-  const res = await fetch(`${creds.baseUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${creds.token}`,
-      'Copilot-Integration-Id': 'hydra-gateway',
-      'Editor-Version': 'hydra/1.0',
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 4096,
-      messages: [
-        { role: 'system', content: systemPrompt ?? defaultSystemPrompt() },
-        { role: 'user', content },
-      ],
-    }),
-  })
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 180_000)
+
+  let res: Response
+  try {
+    res = await fetch(`${creds.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${creds.token}`,
+        'Copilot-Integration-Id': 'hydra-gateway',
+        'Editor-Version': 'hydra/1.0',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 4096,
+        messages: [
+          { role: 'system', content: systemPrompt ?? defaultSystemPrompt() },
+          { role: 'user', content },
+        ],
+      }),
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
 
   if (!res.ok) {
     const body = await res.text().catch(() => '')
