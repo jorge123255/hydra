@@ -90,11 +90,10 @@ function getGitLog(): string {
 /** Read key source files for architectural context (truncated) */
 function getArchitectureContext(): string {
   const files = [
-    { path: 'packages/gateway/src/gateway.ts', maxLines: 80, desc: 'Main message handler + command registry' },
-    { path: 'packages/gateway/src/router.ts', maxLines: 60, desc: 'Intent classification' },
-    { path: 'packages/gateway/src/system-prompt.ts', maxLines: 60, desc: 'System prompt builder — available tool tags' },
-    { path: 'packages/core/src/types.ts', maxLines: 60, desc: 'Core shared types (InboundMessage, OutboundMessage, etc.)' },
-    { path: 'packages/gateway/src/index.ts', maxLines: 40, desc: 'Entry point' },
+    { path: 'packages/gateway/src/gateway.ts', maxLines: 40, desc: 'Main message handler + command registry' },
+    { path: 'packages/gateway/src/router.ts', maxLines: 30, desc: 'Intent classification' },
+    { path: 'packages/gateway/src/system-prompt.ts', maxLines: 30, desc: 'System prompt builder — available tool tags' },
+    { path: 'packages/core/src/types.ts', maxLines: 30, desc: 'Core shared types (InboundMessage, OutboundMessage, etc.)' },
   ]
 
   return files.map(f => {
@@ -254,10 +253,10 @@ DO NOT look at any roadmap or plan file. Ignore PLAN.md entirely. You are going 
 - What would make you smarter, faster, or more useful right now
 
 ## What I Know About Myself
-${selfMd.slice(0, 800)}
+${selfMd.slice(0, 400)}
 
 ## Who I'm Helping
-${memory.slice(0, 600)}
+${memory.slice(0, 400)}
 
 ## Recent Conversations With George
 (This is what actually happened — what he asked, how I responded)
@@ -274,7 +273,7 @@ ${recentProblems}
 ${userFeedback}
 
 ## What I Can Do Right Now
-${capabilities.slice(0, 1000)}
+${capabilities.slice(0, 400)}
 
 ## What I've Already Built (recent git history)
 \`\`\`
@@ -287,7 +286,7 @@ ${skippedNote}
 ${commandGaps}
 
 ## Lessons I've Learned
-${lessons.slice(0, 800)}
+${lessons.slice(0, 300)}
 
 ## Architecture (so you know how to integrate new code)
 ${arch}
