@@ -95,6 +95,7 @@ import { extractFactTags, writeFactsFile, listActiveFacts, formatFactsList, star
 import { buildCapabilities, formatCapabilities, writeCapabilitiesFile } from "./capabilities.js";
 import { runSelfEvolve, getEvolveStats, logConversationTurn } from "./self-evolve.js";
 import { maybeUpdateMemory, getMemoryWriteLog } from "./memory-writer.js";
+import { TelegramReconnectWatcher } from "./telegram-reconnect-watcher.js";
 
 const log = createLogger("gateway");
 
@@ -222,6 +223,7 @@ export class Gateway {
     this.startSelfReviewLoop();
     this.startSelfEvolveLoop();
     this.startSelfAwarenessRefresh();
+    this._telegramWatcher = new TelegramReconnectWatcher(this.registry);
     this.startHealthCheckLoop();
     startFactSweepLoop();
     // Auto-load tokens from codex CLI if available
@@ -313,6 +315,7 @@ ${report}` }).catch(() => {});
   }
 
   private selfEvolveTimer?: NodeJS.Timeout;
+  private _telegramWatcher?: TelegramReconnectWatcher;
 
   private startSelfEvolveLoop(): void {
     const intervalHours = parseInt(process.env.HYDRA_EVOLVE_INTERVAL_HOURS ?? '12', 10)
@@ -343,6 +346,7 @@ ${report}` }).catch(() => {});
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     if (this.selfReviewTimer) clearInterval(this.selfReviewTimer);
     if (this.selfEvolveTimer) clearInterval(this.selfEvolveTimer);
+    this._telegramWatcher?.destroy();
     this.scheduler.stop();
     this.heartbeat.stop();
     for (const [, ctrl] of this.activeRuns) ctrl.abort();
