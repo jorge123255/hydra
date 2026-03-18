@@ -256,11 +256,17 @@ export class Gateway {
     startHealthCheckLoop((report) => {
       const ownerIds = (process.env.HYDRA_OWNER_IDS ?? "").split(",").filter(Boolean);
       for (const ownerId of ownerIds) {
-        const [channelId, senderId] = ownerId.split(":");
-        const ch = this.registry.get(channelId as any);
-        if (!ch) continue;
-        ch.send({ threadId: senderId, text: `🏥 Health alert:
-${report}` }).catch(() => {});
+        try {
+          const [channelId, senderId] = ownerId.split(":");
+          const ch = this.registry.get(channelId as any);
+          if (!ch) continue;
+          ch.send({ threadId: senderId, text: `🏥 Health alert:\n${report}` })
+            .catch((err) => {
+              log.error(`[health-check] Failed to send alert to ${channelId}:${senderId}`, err);
+            });
+        } catch (err) {
+          log.error(`[health-check] Error processing owner ID ${ownerId}`, err);
+        }
       }
     });
   }
