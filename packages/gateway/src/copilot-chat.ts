@@ -177,7 +177,7 @@ export async function callClaudeDirect(
   const auth = await resolveAnthropicAuth()
   if (!auth) throw new Error('No Anthropic credentials — set ANTHROPIC_API_KEY or log in via Claude Code')
 
-  const model = modelOverride ?? process.env.HYDRA_CLAUDE_MODEL ?? 'claude-sonnet-4-6'
+  const model = modelOverride ?? process.env.HYDRA_CLAUDE_MODEL ?? 'claude-haiku-4-5-20251001'
 
   type ImageBlock = { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
   type TextBlock  = { type: 'text'; text: string }
