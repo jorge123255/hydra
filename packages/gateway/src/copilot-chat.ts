@@ -1,12 +1,13 @@
 // Direct AI chat — without OpenCode overhead.
 //
 // Provider priority (cost-aware):
-//   chat/fast  → Ollama local (free, private, instant)
-//   vision     → Claude OAuth / Copilot (only options with vision)
-//   fallback   → Claude OAuth → Codex → Copilot → error
+//   model override → MetaClaw proxy (127.0.0.1:30000) — Opus/Sonnet/any model
+//   chat/fast      → Claude OAuth → Ollama → Codex pool → Copilot
+//   vision         → Claude OAuth / Copilot (only options with vision)
 //
-// Set OLLAMA_HOST=http://192.168.1.x:11434 for remote Ollama.
-// Set HYDRA_OLLAMA_MODEL=nemotron-mini (default) for chat model.
+// MetaClaw: local OpenAI-compatible proxy that routes to all providers
+// including Claude Opus/Sonnet with proper auth + RL skill injection.
+// Set HYDRA_METACLAW_URL (default: http://127.0.0.1:30000/v1) to use it.
 
 export { isCodexConfigured, callCodexDirect, startCodexLogin } from './auth/chatgpt-codex.js'
 
@@ -55,9 +56,16 @@ const ANTHROPIC_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token'
 const ANTHROPIC_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 const OAUTH_BETA_HEADERS = 'claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14'
 
+// MetaClaw: local OpenAI-compatible proxy at port 30000
+// Routes requests to all providers (Claude Opus/Sonnet, Ollama, etc.) with skill injection
+const METACLAW_DEFAULT_URL = 'http://127.0.0.1:30000/v1'
+const METACLAW_DEFAULT_KEY = 'metaclaw'
+
 type AnthropicAuth = { token: string; isOAuth: boolean }
 
 let _openCodeCache: { auth: AnthropicAuth; cachedAt: number } | null = null
+let _metaClawAvailable: boolean | null = null
+let _metaClawCheckedAt = 0
 
 async function refreshOpenCodeToken(
   refreshToken: string
@@ -167,6 +175,116 @@ export function isClaudeConfigured(): boolean {
   }
 }
 
+// ─── MetaClaw Provider ────────────────────────────────────────────────────────
+// Local OpenAI-compatible proxy that routes to any model (including Claude Opus/Sonnet)
+// with RL-based skill injection. Runs at 127.0.0.1:30000.
+
+function getMetaClawUrl(): string {
+  return process.env.HYDRA_METACLAW_URL ?? METACLAW_DEFAULT_URL
+}
+
+function getMetaClawKey(): string {
+  return process.env.HYDRA_METACLAW_KEY ?? METACLAW_DEFAULT_KEY
+}
+
+export function isMetaClawConfigured(): boolean {
+  if (process.env.HYDRA_DISABLE_METACLAW === 'true') return false
+  // Explicit URL set → assume configured
+  if (process.env.HYDRA_METACLAW_URL) return true
+  // Check cache (recheck every 60s)
+  if (_metaClawAvailable !== null && Date.now() - _metaClawCheckedAt < 60_000) {
+    return _metaClawAvailable
+  }
+  // Sync check: can't do async here, return last known state or true (optimistic)
+  return _metaClawAvailable ?? true
+}
+
+/** Probe MetaClaw health once (async) — updates the availability cache */
+export async function probeMetaClaw(): Promise<boolean> {
+  if (process.env.HYDRA_DISABLE_METACLAW === 'true') return false
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 3_000)
+    try {
+      // A minimal chat completion to confirm MetaClaw is up
+      const res = await fetch(`${getMetaClawUrl()}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getMetaClawKey()}`,
+        },
+        body: JSON.stringify({
+          model: 'fast',
+          messages: [{ role: 'user', content: 'ping' }],
+          max_tokens: 5,
+        }),
+        signal: controller.signal,
+      })
+      _metaClawAvailable = res.ok || res.status < 500
+    } finally {
+      clearTimeout(timeout)
+    }
+  } catch {
+    _metaClawAvailable = false
+  }
+  _metaClawCheckedAt = Date.now()
+  if (_metaClawAvailable) log.debug('MetaClaw available at ' + getMetaClawUrl())
+  else log.debug('MetaClaw not reachable — skipping')
+  return _metaClawAvailable
+}
+
+/**
+ * Call MetaClaw proxy (OpenAI-compatible).
+ * Accepts any model name: claude-opus-4-6, nemotron-3-super, devstral-2:123b, etc.
+ * MetaClaw routes to the appropriate backend with skill injection.
+ */
+export async function callMetaClaw(
+  prompt: string,
+  systemPrompt?: string,
+  modelOverride?: string,
+): Promise<string> {
+  const model = modelOverride ?? process.env.HYDRA_METACLAW_MODEL ?? 'nemotron-3-super'
+  const baseUrl = getMetaClawUrl()
+  const apiKey = getMetaClawKey()
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 360_000)
+
+  let res: Response
+  try {
+    res = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 4096,
+        messages: [
+          { role: 'system', content: systemPrompt ?? defaultSystemPrompt() },
+          { role: 'user', content: prompt },
+        ],
+      }),
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    _metaClawAvailable = false
+    _metaClawCheckedAt = Date.now()
+    throw new Error(`MetaClaw error ${res.status}: ${body.slice(0, 200)}`)
+  }
+
+  _metaClawAvailable = true
+  _metaClawCheckedAt = Date.now()
+  const json = (await res.json()) as any
+  return json.choices?.[0]?.message?.content ?? '[No response from MetaClaw]'
+}
+
 /** Call Claude via Anthropic API (supports vision) */
 export async function callClaudeDirect(
   prompt: string,
@@ -230,11 +348,17 @@ export async function callClaudeDirect(
     if (res.status === 401 && auth.isOAuth) {
       _openCodeCache = null
     }
-    // 400 with a specific model override = model not available on this plan
-    // Fall back to haiku automatically
-    if (res.status === 400 && modelOverride && modelOverride !== 'claude-haiku-4-5-20251001') {
-      log.warn(`Model ${modelOverride} not available (400) — falling back to claude-haiku-4-5-20251001`)
-      return callClaudeDirect(prompt, images, systemPrompt, 'claude-haiku-4-5-20251001')
+    // 400 = model not available on this Claude Max OAuth plan (only haiku allowed)
+    // Use `model` (resolved), not `modelOverride` — covers HYDRA_CLAUDE_MODEL env var too
+    // Try MetaClaw first (it has full Opus/Sonnet access), then hard-fall to haiku
+    if (res.status === 400 && model !== 'claude-haiku-4-5-20251001') {
+      log.warn(`Model ${model} not available via direct API (400) — trying MetaClaw`)
+      try {
+        return await callMetaClaw(prompt, systemPrompt, model)
+      } catch (metaErr) {
+        log.warn(`MetaClaw also failed: ${metaErr} — falling back to claude-haiku-4-5-20251001`)
+        return callClaudeDirect(prompt, images, systemPrompt, 'claude-haiku-4-5-20251001')
+      }
     }
     throw new Error(`Anthropic API error ${res.status}: ${body.slice(0, 300)}`)
   }
@@ -300,15 +424,15 @@ export async function callCopilotDirect(
 /**
  * Call the best available direct provider.
  * Cost-aware routing:
- *   - Vision (images) → Claude or Copilot only (Ollama has no vision)
- *   - Chat/fast → Ollama first (free, local), then cloud fallback
- *   - Fallback chain: Claude OAuth → Codex → Copilot
+ *   - Vision (images) → Claude or Copilot only (Ollama/MetaClaw have no vision)
+ *   - Model override  → MetaClaw first (handles Opus/Sonnet/any model)
+ *   - Chat/fast       → Claude OAuth → Ollama → Codex pool → Copilot
  */
 export async function callDirect(
   prompt: string,
   images?: string[],
   systemPrompt?: string,
-  ollamaModelOverride?: string,  // specific Ollama model for this intent
+  ollamaModelOverride?: string,  // specific model for this intent (Ollama or MetaClaw)
 ): Promise<string> {
   const hasImages = !!(images?.length)
 
@@ -320,13 +444,30 @@ export async function callDirect(
     throw new Error('Vision requires Claude or Copilot — no vision-capable provider configured')
   }
 
-  // Priority 1: Claude (primary — auto-refreshes OAuth token)
+  // Priority 1: MetaClaw for specific model requests (Claude Opus/Sonnet, devstral, etc.)
+  // MetaClaw handles any model including ones that fail via direct API
+  if (ollamaModelOverride && process.env.HYDRA_DISABLE_METACLAW !== 'true') {
+    const isClaudeModel = ollamaModelOverride.startsWith('claude-')
+    const metaOk = isClaudeModel
+      ? isMetaClawConfigured()  // Claude models always prefer MetaClaw
+      : false                    // Ollama models go to Ollama (Priority 3)
+    if (metaOk) {
+      log.debug(`Routing ${ollamaModelOverride} to MetaClaw`)
+      try {
+        return await callMetaClaw(prompt, systemPrompt, ollamaModelOverride)
+      } catch (e) {
+        log.warn(`MetaClaw failed for ${ollamaModelOverride}: ${e} — falling through`)
+      }
+    }
+  }
+
+  // Priority 2: Claude (primary — auto-refreshes OAuth token)
   if (isClaudeConfigured()) {
     log.debug('Routing to Claude')
     return callClaudeDirect(prompt, images, systemPrompt)
   }
 
-  // Priority 2: Specific Ollama model requested (subagent routing)
+  // Priority 3: Specific Ollama model requested (subagent routing)
   if (ollamaModelOverride && process.env.OLLAMA_DISABLED !== 'true') {
     const ollamaReady = await isOllamaAvailable()
     if (ollamaReady) {
@@ -335,7 +476,7 @@ export async function callDirect(
     }
   }
 
-  // Priority 3: Ollama default model
+  // Priority 4: Ollama default model
   if (process.env.OLLAMA_DISABLED !== 'true') {
     const ollamaReady = await isOllamaAvailable()
     if (ollamaReady) {
@@ -344,7 +485,17 @@ export async function callDirect(
     }
   }
 
-  // Priority 4: ChatGPT subagent pool → Codex → Copilot
+  // Priority 5: MetaClaw fallback (when Claude direct isn't configured)
+  if (isMetaClawConfigured()) {
+    log.debug('Routing to MetaClaw (fallback)')
+    try {
+      return await callMetaClaw(prompt, systemPrompt, ollamaModelOverride)
+    } catch (e) {
+      log.warn(`MetaClaw fallback failed: ${e}`)
+    }
+  }
+
+  // Priority 6: ChatGPT subagent pool → Codex → Copilot
   if (isCodexPoolConfigured()) {
     log.debug('Routing to ChatGPT subagent pool')
     return callSubagent(prompt, systemPrompt)
@@ -380,6 +531,10 @@ export const MODEL_ALIASES_MAP: Record<string, string> = {
   'fast': 'ministral-3:8b',             // fastest
   'smart': 'kimi-k2:1t',                // strongest general
   'mixtral': 'devstral-2:123b',         // alias
+  // Claude models — routed through MetaClaw
+  'opus': 'claude-opus-4-6',
+  'sonnet': 'claude-sonnet-4-6',
+  'haiku': 'claude-haiku-4-5-20251001',
 }
 
 export type SubagentResult = {
@@ -395,31 +550,30 @@ export async function callSmartSubagent(rawTask: string): Promise<SubagentResult
   // Agent can route by model name: "devstral-2:123b: task" or "devstral: task"
   const modelRouteMatch = trimmed.match(/^([\w.:-]+):\s*(.+)/is)
   let task = trimmed
-  let ollamaModel: string | undefined
+  let modelOverride: string | undefined
 
   if (modelRouteMatch) {
     const candidate = modelRouteMatch[1].toLowerCase()
     const fullName = MODEL_ALIASES_MAP[candidate] ?? (
-      // Accept full model names like "devstral-2:123b"
+      // Accept full model names like "devstral-2:123b" or "claude-opus-4-6"
       Object.values(MODEL_ALIASES_MAP).includes(modelRouteMatch[1]) ? modelRouteMatch[1] : null
     )
     if (fullName) {
-      // Agent explicitly chose a model — honor it
       task = modelRouteMatch[2].trim()
-      ollamaModel = fullName
+      modelOverride = fullName
     }
   }
 
   // If no explicit model, let intent classification pick
-  if (!ollamaModel) {
+  if (!modelOverride) {
     const intent = classifyIntent(task, false)
-    ollamaModel = getOllamaModelForIntent(intent as any)
+    modelOverride = getOllamaModelForIntent(intent as any)
   }
 
-  const modelLabel = ollamaModel ?? 'auto'
+  const modelLabel = modelOverride ?? 'auto'
 
   try {
-    const result = await callDirect(task, undefined, undefined, ollamaModel)
+    const result = await callDirect(task, undefined, undefined, modelOverride)
     return { task, model: modelLabel, result }
   } catch (e) {
     return { task, model: modelLabel, result: '', error: String(e) }
